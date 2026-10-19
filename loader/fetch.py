@@ -63,7 +63,7 @@ def fetch(s: Settings, contract: Contract) -> int:
 def fetch_staged(s: Settings, contract: Contract, staged: Staged) -> int:
     """Move staged files into the drop prefix, oldest first (copy, then delete). Their names (DMS:
     schema/table/timestamp) are kept, flattened. Returns the number of files moved."""
-    zone, bucket = RawZone(s), s.bucket(staged.bucket)
+    zone, bucket = RawZone.for_contract(s, contract), s.bucket(staged.bucket)
     objects = [o for page in zone.s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=staged.prefix)
                for o in page.get("Contents", []) if not o["Key"].endswith("/")]
     for obj in sorted(objects, key=lambda o: (o["LastModified"], o["Key"])):
@@ -91,7 +91,7 @@ def fetch_email(s: Settings, contract: Contract, mail: Email) -> int:
     Nothing about a message is logged beyond counts: senders, subjects and file names can all name
     a patient. Attachment names are replaced by the message hash and an index.
     """
-    zone, dropped, quarantined = RawZone(s), 0, 0
+    zone, dropped, quarantined = RawZone.for_contract(s, contract), 0, 0
     for key in zone.keys(inbox_prefix(mail.mailbox)):
         try:
             raw_message = zone.read(key)
@@ -200,6 +200,6 @@ def fetch_http_api(s: Settings, contract: Contract, api: HttpApi, today: date | 
         log.info("partner API returned no records for %s to %s; nothing landed", start, today)
         return 0
     key = f"{drop_prefix(contract)}api-{start}-{today}-{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}.json"
-    RawZone(s).put(key, b"[" + b",".join(pages) + b"]")
+    RawZone.for_contract(s, contract).put(key, b"[" + b",".join(pages) + b"]")
     log.info("fetched %d records in %d pages for %s to %s", records, len(pages), start, today)
     return 1

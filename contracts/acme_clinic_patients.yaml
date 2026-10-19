@@ -3,6 +3,7 @@
 # prefix, and both write Parquet change files in DMS's shape: the row, `Op` (I, U or D) and `change_seq` (DMS's
 # $AR_H_CHANGE_SEQ, which orders changes; the log position locally).
 source: acme_clinic_patients
+partner: acme
 entity: patients
 owner: data-platform@example.org
 description: Patients table of the clinic's operational database, by change data capture.

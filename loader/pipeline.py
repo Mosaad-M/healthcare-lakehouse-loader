@@ -27,7 +27,7 @@ class Summary:
 
 
 def land_drops(s: Settings, contract: Contract, summary: Summary) -> None:
-    zone, manifest = raw.RawZone(s), Manifest(s)
+    zone, manifest = raw.RawZone.for_contract(s, contract), Manifest(s)
     for drop_key in zone.pending_drops(contract):
         try:
             landed = zone.land(contract, drop_key)
@@ -59,7 +59,7 @@ def to_bronze(s: Settings, contract: Contract, batch: Batch, summary: Summary) -
         with table_lock(s, f"{tables.CATALOG}.{tables.BRONZE}.{contract.table}"):
             rows = bronze.write(s, contract, batch)
     except bronze.Quarantine as reason:
-        key = raw.RawZone(s).quarantine(contract, batch.raw_key, batch.batch_id)
+        key = raw.RawZone.for_contract(s, contract).quarantine(contract, batch.raw_key, batch.batch_id)
         manifest.advance(batch.batch_id, QUARANTINED, reason=str(reason), raw_key=key)
         summary.quarantined.append(batch.batch_id)
         log.warning("batch %s quarantined: %s", batch.batch_id, reason)
@@ -81,6 +81,9 @@ def to_silver(s: Settings, contract: Contract, batch: Batch, summary: Summary) -
 
 
 def ingest(s: Settings, contract: Contract) -> Summary:
+    from loader import offboarding
+
+    offboarding.check_active(s, contract)  # a frozen partner's sources are not loaded
     summary = Summary()
     fetch.fetch(s, contract)  # pull sources put their data in the drop prefix first
     land_drops(s, contract, summary)
@@ -108,6 +111,9 @@ def replay(s: Settings, contract: Contract) -> int:
     nonces, so ciphertext differs while subject IDs and decrypted values are identical. Returns the
     number of batches replayed.
     """
+    from loader import offboarding
+
+    offboarding.check_active(s, contract)
     summary, count = Summary(), 0
     for batch in Manifest(s).for_source(contract.source):
         if batch.state == QUARANTINED:

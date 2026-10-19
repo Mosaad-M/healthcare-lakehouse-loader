@@ -9,7 +9,7 @@ from loader import contracts, tables
 from loader.contracts import Contract
 
 BASE = {
-    "source": "demo", "entity": "rows", "owner": "team@example.org", "format": {"type": "csv"},
+    "source": "demo", "partner": "demo_partner", "entity": "rows", "owner": "team@example.org", "format": {"type": "csv"},
     "columns": [{"name": "id", "type": "string", "phi": "none"},
                 {"name": "ssn", "type": "string", "phi": "identifier", "action": "drop"},
                 {"name": "seen_on", "type": "date"},
@@ -83,3 +83,21 @@ def test_the_loader_and_the_lifecycle_agree_on_raw_expiry():
     from loader import raw
     model = json.loads((Path(__file__).parents[2] / "stack" / "bootstrap" / "model.json").read_text())
     assert raw.EXPIRY_DAYS == model["raw_expiry_days"]
+
+
+def test_a_mailbox_belongs_to_one_partner(tmp_path):
+    import yaml
+
+    from loader import contracts
+
+    example = yaml.safe_load(open("contracts/acme_lab_mail.yaml"))
+    for source, partner in (("mail_a", "acme"), ("mail_b", "metro_lab")):
+        (tmp_path / f"{source}.yaml").write_text(yaml.safe_dump({**example, "source": source, "partner": partner}))
+    with pytest.raises(ValueError, match="belongs to partner"):
+        contracts.load_all(tmp_path)
+
+
+def test_every_example_contract_names_its_partner():
+    from loader import contracts
+
+    assert {c.partner for c in contracts.load_all().values()} == {"acme", "metro_lab", "npi_registry"}

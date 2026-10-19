@@ -1,5 +1,6 @@
 # A lab sends result events as newline-delimited JSON; each result is final once sent.
 source: lab_results
+partner: metro_lab
 entity: results
 owner: data-platform@example.org
 format: {type: ndjson}

@@ -4,6 +4,8 @@
     make sandbox-apply     apply that plan, push images, initialize, start services, bootstrap
     scripts/sandbox.py initialize   redo everything after Terraform (resumes a failed apply)
     scripts/sandbox.py push         rebuild and push the images only
+    scripts/sandbox.py schedule-key-deletion <partner> [--days 30]   after an approved delete (operator only)
+    scripts/sandbox.py cancel-key-deletion <partner>                 within the window
     make sandbox-test      run the suites as an ECS task in the VPC; logs stream here
     make sandbox-destroy   scale down, terraform destroy, then list anything left behind
     scripts/sandbox.py run <command...>   run one command as a toolbox task (logs stream here)
@@ -209,6 +211,25 @@ def bench(args: list[str]) -> None:
     bench_run.main(args)
 
 
+def key_deletion(partner: str, schedule: bool, days: int = 30) -> None:
+    """The operator's step of an approved partner delete (loader/offboarding.py): as the
+    partner-deletion role, the only identity the key policy lets schedule or cancel deletion of a
+    partner's master key. Runs with the operator's own SSO profile, never in a task."""
+    out = outputs()
+    alias = out["partner_keys"][partner]
+    creds = session().client("sts").assume_role(RoleArn=out["partner_deletion_role"],
+                                                RoleSessionName=f"delete-{partner}"[:64])["Credentials"]
+    kms = boto3.client("kms", region_name="us-east-1", aws_access_key_id=creds["AccessKeyId"],
+                       aws_secret_access_key=creds["SecretAccessKey"], aws_session_token=creds["SessionToken"])
+    key = kms.describe_key(KeyId=alias)["KeyMetadata"]["KeyId"]
+    if schedule:
+        when = kms.schedule_key_deletion(KeyId=key, PendingWindowInDays=days)["DeletionDate"]
+        print(f"{alias}: deletion scheduled for {when:%Y-%m-%d}; `cancel-key-deletion {partner}` until then")
+    else:
+        kms.cancel_key_deletion(KeyId=key)
+        print(f"{alias}: deletion cancelled; the key stays disabled until the partner is unfrozen")
+
+
 # ---------------------------------------------------------------- destroy
 
 def destroy() -> None:
@@ -271,6 +292,9 @@ if __name__ == "__main__":
         sys.exit(test(rest))
     elif command == "bench":
         bench(rest)
+    elif command in ("schedule-key-deletion", "cancel-key-deletion"):
+        days = int(rest[rest.index("--days") + 1]) if "--days" in rest else 30
+        key_deletion(rest[0], command == "schedule-key-deletion", days)
     elif command == "destroy":
         destroy()
     elif command == "leftovers":

@@ -207,6 +207,9 @@ class Contract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     source: str = Field(pattern=NAME)
+    # The organization the source comes from: its raw-zone identity, its master key, and the unit of
+    # freeze, report and delete (loader/partners.py). Several sources may share a partner.
+    partner: str = Field(pattern=NAME)
     entity: str = Field(pattern=NAME)
     owner: str
     description: str = ""
@@ -288,4 +291,20 @@ def load_all(directory: Path = Path("contracts")) -> dict[str, Contract]:
     by_source = {c.source: c for c in contracts}
     if len(by_source) != len(contracts):
         raise ValueError("two contracts share a source name")
+    check_partners(contracts)
     return by_source
+
+
+def check_partners(contracts: list[Contract]) -> None:
+    """A mailbox, or a staging bucket and prefix, belongs to one partner: raw-zone access is scoped
+    by those paths, so a shared one would let one partner's load read another's files."""
+    owner: dict[str, str] = {}
+    for c in contracts:
+        if isinstance(c.fetch, Email):
+            path = f"mailbox {c.fetch.mailbox.lower()}"
+        elif isinstance(c.fetch, Staged):
+            path = f"staging {c.fetch.bucket}/{c.fetch.prefix}"
+        else:
+            continue
+        if owner.setdefault(path, c.partner) != c.partner:
+            raise ValueError(f"{path} belongs to partner {owner[path]} and to {c.partner}")

@@ -1,5 +1,6 @@
 # The full provider directory, re-sent weekly. Providers are not patients: no PHI.
 source: provider_directory
+partner: npi_registry
 entity: providers
 owner: data-platform@example.org
 format: {type: csv, delimiter: ",", header: true}

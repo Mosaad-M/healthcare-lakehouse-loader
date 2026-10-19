@@ -1,6 +1,7 @@
 # Acme's partner API: encounters for a date window, paged. Acme restates the last few days as
 # corrections arrive, so every fetch asks for the last 7 days and Silver replaces that window.
 source: acme_encounters
+partner: acme
 entity: encounters
 owner: data-platform@example.org
 description: Encounters from the Acme partner API (mock in the local stack).

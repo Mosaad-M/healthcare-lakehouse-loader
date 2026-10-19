@@ -1,6 +1,7 @@
 # Acme Lab emails a CSV of results each night to a dedicated mailbox. Only its results address
 # counts; anything else sent there is quarantined.
 source: acme_lab_mail
+partner: acme
 entity: results
 owner: data-platform@example.org
 description: Lab results mailed as CSV attachments (SES inbound on AWS; a local SMTP receiver here).

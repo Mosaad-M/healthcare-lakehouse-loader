@@ -6,8 +6,9 @@
 
 Original file names never leave the drop prefix: partners put patient names in file names, and object
 keys reach access logs. Only a hash of the name is kept. The raw bucket is plaintext and expires on a
-short lifecycle; the loader reaches it with its own storage identity (a RustFS user
-locally, the task role on AWS), never the lake's credentials.
+short lifecycle. Loads reach it with credentials scoped to one source's prefixes
+(RawZone.for_contract, loader/partners.py), never the lake's credentials; the unscoped zone is for
+setup, tests and the local mail receiver.
 """
 import hashlib
 from dataclasses import dataclass
@@ -41,9 +42,23 @@ def batch_id(contract: Contract, content_sha256: str) -> str:
 
 
 class RawZone:
-    def __init__(self, s: Settings):
+    def __init__(self, s: Settings, scoped: dict | None = None):
         self.bucket = s.bucket(LOGICAL)
-        self.s3 = s.s3("loader-raw")
+        self.s3 = s.s3(scoped) if scoped else s.s3("loader-raw")
+
+    @classmethod
+    def for_contract(cls, s: Settings, contract: Contract) -> "RawZone":
+        """Only this source's prefixes (and its mailbox or staging prefix)."""
+        from loader import partners
+
+        return cls(s, s.scoped_storage(partners.raw_scope(contract), contract.source))
+
+    @classmethod
+    def for_source(cls, s: Settings, source: str) -> "RawZone":
+        """Only this source's drop, landed and quarantine prefixes (shred, offboarding)."""
+        from loader import partners
+
+        return cls(s, s.scoped_storage({partners.RAW: partners.source_prefixes(source)}, source))
 
     def uri(self, key: str) -> str:
         return f"s3://{self.bucket}/{key}"

@@ -76,6 +76,10 @@ def ensure_source_principal(root: Polaris, s: Settings, contract: Contract) -> N
 
 
 def deploy_contract(root: Polaris, s: Settings, contract: Contract) -> None:
+    from loader import offboarding
+
+    s.partner_keys().ensure(contract.partner)  # locally made here, once; on AWS Terraform made it
+    offboarding.ensure_inbound(s, contract)  # the partner's own put-only drop identity (local)
     for layer in (tables.BRONZE, tables.SILVER):
         ensure_namespace(root, layer)
         ensure_table(root, contract, layer)

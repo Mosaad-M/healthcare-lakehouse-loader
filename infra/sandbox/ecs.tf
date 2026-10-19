@@ -71,6 +71,11 @@ locals {
     { name = "LOADER_DUCKDB_MEMORY_LIMIT", value = "4GB" },
     # Integrity repair copies a lost lake file back from its previous version (loader/integrity.py).
     { name = "LOADER_LAKE_RESTORE_ROLE_ARN", value = aws_iam_role.lake_restore.arn },
+    # Raw-zone sessions scoped to one source (loader/partners.py).
+    { name = "LOADER_RAW_ACCESS_ROLE_ARN", value = aws_iam_role.raw_access.arn },
+    # Partner master keys and drop roles (partners.tf).
+    { name = "LOADER_PARTNER_KEY_ALIAS_PREFIX", value = "alias/${var.name}-partner-" },
+    { name = "LOADER_PARTNER_ROLE_PREFIX", value = "${var.name}-partner-" },
     # Where flow runs go: toolbox tasks started by the Prefect ECS worker (flows/deploy.py).
     { name = "LOADER_ECS_CLUSTER", value = var.name },
     { name = "LOADER_TOOLBOX_IMAGE", value = "${aws_ecr_repository.r["toolbox"].repository_url}:${var.image_tag}" },

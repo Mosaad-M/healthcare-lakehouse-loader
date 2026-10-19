@@ -40,7 +40,7 @@ def encrypt_identifiers(con: duckdb.DuckDBPyConnection, s: Settings, contract: C
         raise Quarantine(f"subject key ({', '.join(key)}) is empty in {empty} rows")
     as_text = ", ".join(f"CAST({k} AS VARCHAR)" for k in key)
     subjects = Identity(s).resolve(contract.source, [tuple(r) for r in con.execute(f"SELECT DISTINCT {as_text} FROM typed").fetchall()])
-    keys = KeyVault(s).get_or_create(list(subjects.values()), contract.source)
+    keys = KeyVault(s).get_or_create(list(subjects.values()), contract.source, contract.partner)
 
     idents = [c.name for c in contract.identifiers]
     # Read the batch as Arrow (columnar, compact) and encrypt it a chunk at a time, so Python holds
@@ -75,9 +75,12 @@ def encrypt_identifiers(con: duckdb.DuckDBPyConnection, s: Settings, contract: C
     return sids
 
 
-def raw_secret(con: duckdb.DuckDBPyConnection, s: Settings) -> None:
-    """The raw zone's own storage identity, scoped to the raw bucket only."""
-    con.execute(s.duckdb_s3_secret("raw_zone", f"s3://{s.bucket(raw.LOGICAL)}/", "loader-raw"))
+def raw_secret(con: duckdb.DuckDBPyConnection, s: Settings, contract: Contract) -> None:
+    """Raw-zone credentials scoped to this source's prefixes (loader/partners.py)."""
+    from loader import partners
+
+    con.execute(s.duckdb_s3_secret("raw_zone", f"s3://{s.bucket(raw.LOGICAL)}/",
+                                   s.scoped_storage(partners.raw_scope(contract), contract.source)))
 
 
 def reader(contract: Contract, uri: str) -> str:
@@ -101,7 +104,7 @@ def stage(con: duckdb.DuckDBPyConnection, s: Settings, contract: Contract, batch
 
     Returns the row count. Raises Quarantine when the file breaks the contract.
     """
-    zone = raw.RawZone(s)
+    zone = raw.RawZone.for_contract(s, contract)
     src = reader(contract, zone.uri(batch.raw_key))
     # Size caps before anything is loaded into memory: an oversized file would run the loader out of
     # memory, and a batch that kills its process is retried on every run.
@@ -190,7 +193,7 @@ def write(s: Settings, contract: Contract, batch: Batch) -> int:
         con = duckdb.connect()
         duck.load_extensions(con, s)
         duck.deny_unscoped(con, s)
-        raw_secret(con, s)
+        raw_secret(con, s, contract)
         rows = stage(con, s, contract, batch, staged)
 
         table = tables.qualified(contract, tables.BRONZE)

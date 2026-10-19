@@ -13,7 +13,8 @@ a public issue.
 |---|---|---|
 | Plaintext PHI | Raw zone (drops, landed files, inbox, staging, quarantine); loader memory during Bronze | Readable by anyone who gets it |
 | Identifier ciphertext | Bronze, Silver, Gold, Doris copies | Safe only while keys stay in the vault |
-| Subject data keys | Key vault (DynamoDB), wrapped by a per-source key-encryption key, itself wrapped by KMS | An unwrapped key decrypts every identifier of its subject |
+| Subject data keys | Key vault (DynamoDB), wrapped by a per-source key-encryption key, itself wrapped by the partner's master key (KMS) | An unwrapped key decrypts every identifier of its subject |
+| Partner master keys | KMS, one per partner (a state-volume key locally) | Disabling one freezes a partner; deleting one is irreversible |
 | Identity pepper | Secrets Manager (`.env` locally) | With it, guessed identifiers can be tested against the identity map |
 | Principal and source credentials | Secrets Manager (a state volume locally) | Catalog access per table; partner API tokens |
 | Audit records | Decrypt audit and shred journal (Object Lock), CloudTrail | Proof of who saw what, and that an erasure happened |
@@ -33,7 +34,7 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 
 | Threat | Control | Status |
 |---|---|---|
-| S: a partner drops files for another source | Drop prefixes per source; a storage identity per partner is on the roadmap | partial |
+| S: a partner drops files for another source | Each partner drops with its own identity, put-only into its own sources' drop prefixes (a role per partner on AWS, a storage user locally); it cannot read, list or delete anything (`test_a_partner_can_only_drop_into_its_own_sources`, `test_a_partner_drop_role_reaches_only_its_own_drop_prefixes`) | tested |
 | T: a writer into the raw zone alters landed files | Capture tools may only put, into their own prefix or bucket: the stream sink (`test_the_sink_can_only_put_into_drop_prefixes`), DMS only into `cdc-staging` | tested |
 | I: patient names in file names reach logs and keys | Names never leave the drop prefix; only their hash is kept (`test_attachments_from_the_lab_are_loaded_and_the_message_is_not_kept`) | tested |
 | I: mail bodies kept | Bodies deleted after extraction (`test_email.py`) | tested |
@@ -58,6 +59,7 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 | E: a source principal touches another source's tables | Per-source principals granted their own two tables only (`tests/access`; on real S3, `test_vended_credentials_reach_one_table_on_real_s3`) | tested |
 | E: direct S3 access to the lake | Bucket policies deny everyone but the catalog's vending roles, the restore role and break-glass, whatever IAM grants (`tests/aws/test_guardrail.py`) | tested on AWS |
 | E: the restore role used to read or change the lake | It may only list versions, read earlier versions and copy an object back within its bucket; the bucket policy enforces the same; uploads, deletes and cross-bucket copies refused (`test_the_restore_identity_can_only_copy_versions_back`); every request in CloudTrail | tested |
+| I: a load reads another source's or partner's raw files | Loads reach the raw zone only with short-lived credentials whose session policy admits their own source's prefixes (and mailbox or staging prefix); on AWS the flow role has no raw access of its own, only the right to assume the raw-access role (`test_a_load_reaches_only_its_own_source`) | tested |
 | I: lost vended credentials send requests unsigned | A fail-closed catch-all storage secret: requests without a table's credentials go nowhere (`test_lake_requests_never_leave_the_stack`) | tested |
 | I: PHI in Iceberg metadata (statistics, partition values, paths) | Column metrics limited to counts in the PHI catalog; partitions by ingest day only (`test_phi_metadata.py`) | tested |
 | T: a writer changes table properties | Deploy re-asserts them; a catalog-side guard is not built | partial |
@@ -80,6 +82,10 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 | I: keys readable outside the loader | Subject keys wrapped by a per-source KEK, KEKs by the master key in KMS; unwrapped KEKs cached in process memory for 15 minutes (`test_key_hierarchy.py`) | tested |
 | R: no per-subject record of key use | CloudTrail records KEK unwraps, not one per subject (one KMS request per batch is what keeps KMS cheap); re-identification is audited per person by the decrypt service | accepted |
 | T: a restored vault brings shredded keys back | A restore locks the vault, re-applies every shred in the journal, then unlocks; reads check the gate before and after (`test_restoring_an_old_vault_backup_does_not_bring_keys_back`, `test_a_restore_that_starts_during_a_read_serves_no_keys`) | tested |
+| T: a partner's data is deleted without approval, or too early | A delete refuses unless the partner is frozen, two different approvers are named and a fresh report has the approved hash; the approval is written to the write-once journal before anything is removed (`test_a_delete_refuses_without_freeze_approvals_or_the_approved_report`). On AWS no task can delete a partner's master key: its key policy reserves deletion for a role only the operator's SSO identity can assume (`test_no_task_role_can_schedule_deletion_of_a_partner_key`), and KMS waits 30 days before deleting, cancelable | tested |
+| I: a frozen partner's identifiers stay readable | Its master key is disabled, so its KEKs cannot be unwrapped; cached KEKs are dropped at once in the freezing process and within 60 s elsewhere; its sources are not loaded and its drop identity is disabled (`test_a_freeze_stops_everything_and_unfreeze_restores_it`) | tested |
+| T: a delete stops part-way | Each step is recorded; rerunning the same request resumes, another request is refused (`test_an_approved_delete_removes_everything_and_leaves_other_partners`) | tested |
+| T: a vault backup brings a deleted partner back | The backup holds wrapped keys only; with the partner's master key gone they cannot be unwrapped (same test) | tested |
 | E: every task holds administrator credentials | Flow runs get only what a flow needs (no catalog root, no admin secrets); Doris refreshes as a refresher role; bootstrap and tests use a separate admin task (`test_least_privilege.py`, `test_the_refresher_reads_gold_only`) | tested |
 
 ### Orchestration, supply chain and operations
@@ -107,7 +113,8 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 |---|---|
 | Identifier values | AES-256-GCM under the subject's data key; a fresh 96-bit nonce from `os.urandom` per value; associated data `subject_id \0 column`, so a value moved to another subject or column does not decrypt. Layout: version (1 byte), nonce (12), ciphertext and tag |
 | Subject data keys | 256-bit, one per (source, subject), wrapped by the source's KEK with AES-256-GCM and associated data `subject-key \0 kek_id \0 subject_id` |
-| Key-encryption keys | One per source, wrapped by the master key: KMS on AWS (the encryption context names the KEK), AES-256-GCM locally |
+| Key-encryption keys | One per source, wrapped by its partner's master key: KMS on AWS (the encryption context names partner and KEK), AES-256-GCM locally (associated data names partner and KEK), so a KEK cannot be moved to another partner. KEKs from before partner keys stay readable under the shared master key until `rewrap-keks` moves them |
+| Partner master keys | One per partner. Disabled by a freeze (reversible); deleted only by an approved delete, on AWS only by the partner-deletion role |
 | Erasure | Crypto-shredding: delete the subject's wrapped key after writing the journal entry. Every copy of their identifiers, in every layer, snapshot and backup, becomes unreadable at once |
 | Blind index | HMAC-SHA256 with a secret pepper over the source name and the normalized key fields. The field separator is whitespace to the normalizer, so fields can never run together |
 | Re-identification | Role, purpose and subject cap from policy; every call audited, write-once, before anything is decrypted |
@@ -150,6 +157,9 @@ Accepted findings carry their reason where they are accepted (`.trivyignore.yaml
 - **Deleted lake objects are kept 3 days**, so a lost file can be restored. Erasure does not depend
   on deleting lake files (identifiers are crypto-shredded), and the raw zone, which holds plaintext,
   is not versioned and expires after 30 days.
+- **A deleted partner's Gold models.** dbt models that read a deleted partner's tables fail on the
+  next Gold run until they are changed (a reviewed pull request); the report lists them, and
+  `--gold keep` keeps their de-identified aggregates if leadership and legal decide so.
 - **Polaris purges on AWS.** Polaris 1.8 puts the list of files to delete into an STS session tag,
   which breaks STS's limits once session tags are on (they name principal and table in CloudTrail),
   so a table dropped with purge keeps its files. Drop without purge and let maintenance's orphan

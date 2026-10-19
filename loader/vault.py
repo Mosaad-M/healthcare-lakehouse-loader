@@ -1,7 +1,10 @@
 """Key vault: one data key per subject.
 
 Key hierarchy: each subject key is wrapped by its source's key-encryption key (KEK); each KEK is
-wrapped by the master key (KMS on AWS) and kept in its own table. A batch unwraps its source's KEK
+wrapped by its partner's master key (loader/partner_keys.py; KMS on AWS) and kept in its own table.
+KEKs from before partner keys are wrapped by the shared master key until `loader.cli rewrap-keks`
+moves them. A KEK whose partner key is disabled (a frozen partner) cannot be unwrapped: its subjects
+read as unreadable, exactly as shredded ones do, until the partner is unfrozen. A batch unwraps its source's KEK
 once (one KMS request, cached in the process for a few minutes) and its subjects' keys locally.
 Subject keys from before the hierarchy (wrapped by the master key directly, no `kek_id`) stay
 readable. KEKs are never deleted: erasure deletes subject keys, as before.
@@ -20,7 +23,7 @@ import time
 
 import botocore.exceptions
 
-from loader import crypto
+from loader import crypto, partner_keys
 from loader.parallel import map_io
 
 from loader.settings import Settings
@@ -28,7 +31,7 @@ from loader.settings import Settings
 KEY_VAULT, VAULT_STATE, KEKS = "key_vault", "vault_state", "key_encryption_keys"
 KEK_VERSION = 1  # rotation would add version 2 and re-wrap subject keys in the background
 KEK_CACHE_SECONDS = 900
-_kek_cache: dict[str, tuple[bytes, float]] = {}
+_kek_cache: dict[str, tuple[bytes, float, str | None]] = {}  # kid -> (KEK, expiry, partner)
 _kek_lock = threading.Lock()
 
 
@@ -44,7 +47,8 @@ class VaultLocked(RuntimeError):
 class KeyVault:
     def __init__(self, s: Settings, provider: crypto.KeyProvider | None = None):
         self.ddb = s.dynamodb()
-        self.provider = provider or s.key_provider()
+        self.provider = provider or s.key_provider()  # the shared master key (KEKs from before partner keys)
+        self.partner_keys = s.partner_keys()
 
     def _check_gate(self) -> None:
         item = self.ddb.get_item(TableName=VAULT_STATE, Key=GATE, ConsistentRead=True).get("Item")
@@ -52,33 +56,70 @@ class KeyVault:
             raise VaultLocked("key vault restore pending: shred journal not yet replayed")
 
     # -- key-encryption keys
-    def _kek(self, kid: str, create_for: str | None = None) -> bytes | None:
+    def _kek(self, kid: str, create_for: tuple[str, str | None] | None = None) -> bytes | None:
         """The unwrapped KEK `kid`: from this process's cache, the table, or (with `create_for`, the
-        source) newly made. None if it does not exist and none was asked for."""
+        source and its partner) newly made. None if it does not exist and none was asked for. Raises
+        partner_keys.Unavailable when its partner's master key is disabled or gone."""
         now = time.monotonic()
         with _kek_lock:
             cached = _kek_cache.get(kid)
-            if cached and cached[1] > now:
+        if cached and cached[1] > now:
+            if cached[2] is None or partner_keys.usable(self.partner_keys, cached[2]):
                 return cached[0]
+            with _kek_lock:
+                _kek_cache.pop(kid, None)  # frozen since it was cached
+            raise partner_keys.Unavailable(f"master key of partner {cached[2]} is not enabled")
         item = self.ddb.get_item(TableName=KEKS, Key={"kek_id": {"S": kid}}, ConsistentRead=True).get("Item")
+        partner = item["partner"]["S"] if item and "partner" in item else None
         if item is None and create_for:
+            source, partner = create_for
             kek = crypto.new_data_key()
+            record = {"kek_id": {"S": kid}, "source": {"S": source}}
+            if partner:
+                record.update(partner={"S": partner}, master_key_id={"S": self.partner_keys.ensure(partner)},
+                              wrapped_kek={"B": self.partner_keys.wrap(partner, kid, kek)})
+            else:
+                record["wrapped_kek"] = {"B": self.provider.wrap(kek, f"kek:{kid}")}
             try:
-                self.ddb.put_item(TableName=KEKS, Item={
-                    "kek_id": {"S": kid}, "source": {"S": create_for},
-                    "wrapped_kek": {"B": self.provider.wrap(kek, f"kek:{kid}")}},
-                    ConditionExpression="attribute_not_exists(kek_id)")
+                self.ddb.put_item(TableName=KEKS, Item=record, ConditionExpression="attribute_not_exists(kek_id)")
             except botocore.exceptions.ClientError as err:
                 if err.response["Error"]["Code"] != "ConditionalCheckFailedException":
                     raise
                 return self._kek(kid)  # another writer made it first
         elif item is None:
             return None
+        elif partner:
+            kek = self.partner_keys.unwrap(partner, kid, item["wrapped_kek"]["B"])
         else:
             kek = self.provider.unwrap(item["wrapped_kek"]["B"], f"kek:{kid}")
         with _kek_lock:
-            _kek_cache[kid] = (kek, now + KEK_CACHE_SECONDS)
+            _kek_cache[kid] = (kek, now + KEK_CACHE_SECONDS, partner)
         return kek
+
+    def rewrap_keks(self, partner_of_source: dict[str, str]) -> dict[str, int]:
+        """Move KEKs wrapped by the shared master key under their partner's key (idempotent: a KEK
+        that already names its partner is left alone). Returns counts."""
+        moved = skipped = 0
+        for item in self._scan(KEKS):
+            kid, source = item["kek_id"]["S"], item["source"]["S"]
+            if "partner" in item:
+                continue
+            partner = partner_of_source.get(source)
+            if partner is None:
+                skipped += 1  # a source no contract names any more
+                continue
+            kek = self.provider.unwrap(item["wrapped_kek"]["B"], f"kek:{kid}")
+            self.ddb.update_item(
+                TableName=KEKS, Key={"kek_id": {"S": kid}},
+                UpdateExpression="SET wrapped_kek = :new, #p = :p, master_key_id = :m",
+                ConditionExpression="attribute_not_exists(#p) AND wrapped_kek = :old",
+                ExpressionAttributeNames={"#p": "partner"},
+                ExpressionAttributeValues={":new": {"B": self.partner_keys.wrap(partner, kid, kek)}, ":p": {"S": partner},
+                                           ":m": {"S": self.partner_keys.ensure(partner)}, ":old": item["wrapped_kek"]})
+            with _kek_lock:
+                _kek_cache.pop(kid, None)
+            moved += 1
+        return {"moved": moved, "skipped_no_contract": skipped}
 
     # -- subject keys
     def get(self, subject_ids: list[str]) -> dict[str, bytes]:
@@ -97,11 +138,18 @@ class KeyVault:
         # Again after reading: a restore that started meanwhile may have written back shredded keys
         # (it locks the gate before it writes any).
         self._check_gate()
-        out, legacy = {}, []
+        out, legacy, frozen = {}, [], set()
         for sid, item in items.items():
             if "kek_id" in item:
                 kid = item["kek_id"]["S"]
-                out[sid] = crypto.unwrap_with_kek(self._kek(kid), kid, sid, item["wrapped_key"]["B"])
+                if kid in frozen:
+                    continue
+                try:
+                    kek = self._kek(kid)
+                except partner_keys.Unavailable:
+                    frozen.add(kid)  # the partner is frozen: its subjects read as unreadable
+                    continue
+                out[sid] = crypto.unwrap_with_kek(kek, kid, sid, item["wrapped_key"]["B"])
             else:
                 legacy.append(sid)
         # Keys from before the hierarchy: one master-key unwrap each (a KMS request on AWS).
@@ -110,15 +158,16 @@ class KeyVault:
         out.update(zip(legacy, keys))
         return out
 
-    def get_or_create(self, subject_ids: list[str], source: str) -> dict[str, bytes]:
+    def get_or_create(self, subject_ids: list[str], source: str, partner: str | None = None) -> dict[str, bytes]:
         """Keys of `subject_ids` (all subjects of `source`), creating the missing ones under the
-        source's KEK."""
+        source's KEK, which `partner`'s master key wraps (the shared master key without one). Raises
+        partner_keys.Unavailable for a frozen partner."""
         keys = self.get(subject_ids)
         missing = sorted(set(subject_ids) - set(keys))
         if not missing:
             return keys
         kid = kek_id(source)
-        kek = self._kek(kid, create_for=source)
+        kek = self._kek(kid, create_for=(source, partner))
 
         def create(sid: str) -> dict[str, bytes]:
             data_key = crypto.new_data_key()
@@ -156,8 +205,8 @@ class KeyVault:
         this stack). Everything in it is wrapped: it is useless without the master key."""
         b64 = lambda v: base64.b64encode(v).decode()  # noqa: E731
         return json.dumps({
-            "keks": [{"kek_id": i["kek_id"]["S"], "source": i["source"]["S"], "wrapped_kek": b64(i["wrapped_kek"]["B"])}
-                     for i in self._scan(KEKS)],
+            "keks": [{"kek_id": i["kek_id"]["S"], "source": i["source"]["S"], "wrapped_kek": b64(i["wrapped_kek"]["B"]),
+                      **{k: i[k]["S"] for k in ("partner", "master_key_id") if k in i}} for i in self._scan(KEKS)],
             "keys": [{"subject_id": i["subject_id"]["S"], "wrapped_key": b64(i["wrapped_key"]["B"]),
                       **({"kek_id": i["kek_id"]["S"]} if "kek_id" in i else {})} for i in self._scan(KEY_VAULT)]})
 
@@ -174,7 +223,8 @@ class KeyVault:
         for kek in data["keks"]:
             self.ddb.put_item(TableName=KEKS, Item={
                 "kek_id": {"S": kek["kek_id"]}, "source": {"S": kek["source"]},
-                "wrapped_kek": {"B": base64.b64decode(kek["wrapped_kek"])}})
+                "wrapped_kek": {"B": base64.b64decode(kek["wrapped_kek"])},
+                **{k: {"S": kek[k]} for k in ("partner", "master_key_id") if k in kek}})
         restored = 0
         for item in data["keys"]:
             self.ddb.put_item(TableName=KEY_VAULT, Item={

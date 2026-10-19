@@ -2,6 +2,7 @@
 # object on the Kafka topic named after this source; the stream sink writes them into the drop
 # prefix every few seconds (Firehose on AWS) and the file-drop path loads them.
 source: acme_vitals
+partner: acme
 entity: readings
 owner: data-platform@example.org
 description: Vital-sign readings from bedside monitors, by streaming.

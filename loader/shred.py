@@ -71,11 +71,11 @@ def shred(s: Settings, request_id: str, actor: str, reason: str, person_id: str 
     KeyVault(s).delete(subject_ids)
     identity.forget(subject_ids)
 
-    manifest, zone, deleted = Manifest(s), raw.RawZone(s), 0
+    manifest, deleted = Manifest(s), 0
     for batch_id in batches_mentioning(s, set(subject_ids)):
         batch = manifest.get(batch_id)
         if batch and batch.raw_key and not batch.raw_purged:
-            zone.delete(batch.raw_key)
+            raw.RawZone.for_source(s, batch.source).delete(batch.raw_key)
             manifest.mark_raw_purged(batch_id)
             deleted += 1
     s.dynamodb().put_item(TableName=SHRED_EVENTS, Item={
