@@ -1,0 +1,20 @@
+# Bedside monitors publish vital-sign readings as events (minutes tier). Each reading is one JSON
+# object on the Kafka topic named after this source; the stream sink writes them into the drop
+# prefix every few seconds (Firehose on AWS) and the file-drop path loads them.
+source: acme_vitals
+entity: readings
+owner: data-platform@example.org
+description: Vital-sign readings from bedside monitors, by streaming.
+format: {type: ndjson}
+fetch: {kind: stream}
+columns:
+  - {name: reading_id, type: string, phi: none, description: The device's event ID (unique per reading)}
+  - {name: patient_mrn, type: string, phi: identifier, description: The hospital's MRN (the subject key)}
+  - {name: device_id, type: string, phi: none}
+  - {name: measured_at, type: timestamptz, phi: phi}
+  - {name: metric, type: string, phi: none, description: "heart_rate, spo2, resp_rate or temp_c"}
+  - {name: value, type: double, phi: phi}
+primary_key: [reading_id]
+silver: {semantics: append}
+subject: {key: [patient_mrn]}
+poll_seconds: 60

@@ -1,0 +1,26 @@
+# Change data capture from the clinic's Postgres: AWS DMS on AWS, Debezium plus cdc-sink locally.
+# Both write to their own staging bucket (never the raw zone), which each fetch moves into the drop
+# prefix, and both write Parquet change files in DMS's shape: the row, `Op` (I, U or D) and `change_seq` (DMS's
+# $AR_H_CHANGE_SEQ, which orders changes; the log position locally).
+source: acme_clinic_patients
+entity: patients
+owner: data-platform@example.org
+description: Patients table of the clinic's operational database, by change data capture.
+format: {type: parquet}
+fetch: {kind: staged, bucket: cdc-staging, prefix: acme_clinic_patients/}
+columns:
+  - {name: patient_id, type: long, phi: none, description: Surrogate key in the clinic system}
+  - {name: mrn, type: string, phi: identifier, description: The clinic's MRN (the subject key)}
+  - {name: full_name, type: string, phi: identifier}
+  - {name: email, type: string, phi: identifier}
+  - {name: birth_year, type: int, phi: phi}
+  - {name: zip3, type: string, phi: phi}
+  - {name: plan_code, type: string, phi: none}
+  - {name: balance, type: "decimal(10,2)", phi: none}
+  - {name: updated_at, type: timestamptz, phi: phi}
+  - {name: cdc_op, type: string, phi: none, source: Op, description: "I (insert), U (update) or D (delete)"}
+  - {name: cdc_seq, type: "decimal(38,0)", phi: none, source: change_seq, description: Change sequence (orders changes)}
+primary_key: [patient_id]
+silver: {semantics: cdc, op_column: cdc_op, order_column: cdc_seq}
+subject: {key: [mrn]}
+poll_seconds: 60

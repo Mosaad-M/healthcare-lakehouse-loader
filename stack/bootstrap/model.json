@@ -1,0 +1,172 @@
+{
+  "buckets": [
+    "raw",
+    "lake-phi",
+    "lake-deid",
+    "cdc-staging"
+  ],
+  "dynamodb_ttl": {
+    "batch_subjects": "expires_at"
+  },
+  "dynamodb_tables": {
+    "loader_manifest": "batch_id",
+    "loader_locks": "lock_name",
+    "identity_map": "blind_index",
+    "subjects": "subject_id",
+    "persons": "person_id",
+    "key_vault": "subject_id",
+    "key_encryption_keys": "kek_id",
+    "vault_state": "name",
+    "batch_subjects": "batch_id",
+    "shred_events": "request_id",
+    "decrypt_audit": "event_id",
+    "serving_refresh": "copy",
+    "maintenance_runs": "run_id"
+  },
+  "catalogs": {
+    "phi": "lake-phi",
+    "deid": "lake-deid"
+  },
+  "catalog_properties": {
+    "polaris.config.drop-with-purge.enabled": "true"
+  },
+  "catalog_roles": {
+    "writer": [
+      {
+        "type": "catalog",
+        "privilege": "CATALOG_MANAGE_CONTENT"
+      }
+    ],
+    "reader": [
+      {
+        "type": "catalog",
+        "privilege": "TABLE_READ_DATA"
+      },
+      {
+        "type": "catalog",
+        "privilege": "NAMESPACE_LIST"
+      },
+      {
+        "type": "catalog",
+        "privilege": "TABLE_LIST"
+      },
+      {
+        "type": "catalog",
+        "privilege": "VIEW_LIST"
+      }
+    ],
+    "maintainer": [
+      {
+        "type": "catalog",
+        "privilege": "TABLE_WRITE_DATA"
+      },
+      {
+        "type": "catalog",
+        "privilege": "NAMESPACE_LIST"
+      },
+      {
+        "type": "catalog",
+        "privilege": "TABLE_LIST"
+      },
+      {
+        "type": "catalog",
+        "privilege": "POLICY_LIST"
+      },
+      {
+        "type": "catalog",
+        "privilege": "POLICY_READ"
+      }
+    ]
+  },
+  "principals": {
+    "loader": [
+      "writer"
+    ],
+    "doris_reader": [
+      "reader"
+    ],
+    "maintenance": [
+      "maintainer"
+    ],
+    "decrypt_service": [
+      "reader"
+    ],
+    "auditor": [
+      "reader"
+    ]
+  },
+  "policy_namespace": "ops",
+  "default_policies": {
+    "default_data_compaction": {
+      "type": "system.data-compaction",
+      "description": "Bin-pack small files; rewrite files with many deletes.",
+      "content": {
+        "version": "2025-02-03",
+        "enable": true,
+        "config": {
+          "target-file-size-bytes": 134217728,
+          "min-input-files": 5,
+          "delete-file-threshold": 3
+        }
+      }
+    },
+    "default_snapshot_expiry": {
+      "type": "system.snapshot-expiry",
+      "description": "Keep 7 days of snapshots and at least 5.",
+      "content": {
+        "version": "2025-02-03",
+        "enable": true,
+        "config": {
+          "max-snapshot-age-hours": 168,
+          "min-snapshots-to-keep": 5
+        }
+      }
+    },
+    "default_orphan_file_removal": {
+      "type": "system.orphan-file-removal",
+      "description": "Remove unreferenced files older than 3 days (files left by retried commits).",
+      "content": {
+        "version": "2025-02-03",
+        "enable": true,
+        "max_orphan_file_age_in_days": 3
+      }
+    },
+    "default_metadata_compaction": {
+      "type": "system.metadata-compaction",
+      "description": "Rewrite manifests when a table has many small ones.",
+      "content": {
+        "version": "2025-02-03",
+        "enable": true,
+        "config": {
+          "max-manifests": 100
+        }
+      }
+    }
+  },
+  "decrypt_policy": {
+    "roles": {
+      "care_coordinator": {
+        "purposes": [
+          "treatment"
+        ],
+        "max_subjects": 20
+      },
+      "billing_specialist": {
+        "purposes": [
+          "payment"
+        ],
+        "max_subjects": 50
+      },
+      "privacy_officer": {
+        "purposes": [
+          "patient_request",
+          "legal"
+        ],
+        "max_subjects": 200
+      }
+    }
+  },
+  "raw_expiry_days": 30,
+  "lake_version_days": 3,
+  "shred_journal_retention_days": 1
+}

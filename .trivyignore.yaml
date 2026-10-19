@@ -1,0 +1,5 @@
+# Reviewed scanner findings. Each entry is scoped to its path and says why it is accepted.
+misconfigurations:
+  - id: AVD-DS-0002
+    paths: ["stack/prefect-worker/Dockerfile"]
+    statement: Local worker only; it starts flow containers through the Docker socket, which is root on the VM anyway. The AWS worker (prefect-worker-ecs) is not root.

@@ -1,0 +1,22 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+.up-started
+infra/**/.terraform/
+infra/**/*.tfstate*
+infra/**/*.tfvars
+infra/**/tfplan
+infra/**/.terraform.lock.hcl.bak
+
+# Core dumps from crashed processes in the toolbox (the repo is mounted at /app)
+core
+core.*
+.hypothesis/
+dbt/logs/
+dbt/target/
+reports/
+verify-report.md
+.coverage

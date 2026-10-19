@@ -1,0 +1,361 @@
+# The local stack. Start it with `make up`; see the README for what each service is for.
+# Values come from ../.env (local test values only, created from .env.example).
+name: lakehouse
+
+# Services that run the loader image. Only `bootstrap` builds it: with `build` here, a first
+# `make up` built the same tag once per service in parallel, which Docker Desktop's image store
+# refuses ("image already exists").
+x-toolbox: &toolbox
+  image: lakehouse-loader/toolbox:dev
+  pull_policy: never  # built locally, never on a registry
+  env_file: [../.env]
+  environment: &toolbox-env
+    POLARIS_URI: http://polaris:8181/api/catalog
+    POLARIS_MANAGEMENT_URI: http://polaris:8181/api/management/v1
+    S3_ENDPOINT: http://rustfs:9000
+    DYNAMODB_ENDPOINT: http://dynamodb:8000
+    SPARK_REMOTE: sc://spark:15002
+    DORIS_HOST: doris-fe
+    # The loader's own logger goes to Prefect too (its messages never carry data values).
+    PREFECT_LOGGING_EXTRA_LOGGERS: loader
+    # Library code logs outside flows too (tests, CLI); those messages stay local.
+    PREFECT_LOGGING_TO_API_WHEN_MISSING_FLOW: ignore
+    PREFECT_API_URL: http://prefect:4200/api
+    LOADER_STATE_DIR: /state
+    LOADER_PAUSE_SCHEDULES: ${LOADER_PAUSE_SCHEDULES:-0}
+    LOADER_FETCH_ALLOW_PRIVATE: "1"  # the mock partner API is on this private network
+  volumes: [state:/state]  # principal secrets written by the bootstrap
+  networks: [lake]
+  ulimits: {core: 0}  # no memory dumps (they would hold plaintext identifiers); loader/__init__.py too
+
+networks:
+  lake:
+    ipam:
+      config:
+        # Doris wants fixed addresses; dynamic ones stay in the upper half.
+        - {subnet: 172.20.90.0/24, ip_range: 172.20.90.128/25}
+
+volumes:
+  state: {}
+  source-pg: {}
+  debezium: {}
+  cdc-spool: {}
+  doris-fe: {}
+  doris-be: {}
+  rustfs-data: {}
+  polaris-db: {}
+  dynamodb-data: {}
+  prefect-db: {}
+
+services:
+  # ------------------------------------------------------------ storage
+  # S3-compatible object store (MinIO's community images were withdrawn in 2025).
+  rustfs:
+    image: rustfs/rustfs:1.0.1-glibc
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+      RUSTFS_VOLUMES: /data
+      RUSTFS_CONSOLE_ENABLE: "true"
+    volumes: [rustfs-data:/data]
+    # Each connection and open object is a file descriptor; the default 1024 is easy to reach when
+    # DuckDB reads many files in parallel (transient "could not connect" errors under load).
+    ulimits: {nofile: {soft: 65536, hard: 65536}}
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:9000/health > /dev/null"]
+      interval: 2s
+      retries: 60
+    ports: ["9000:9000", "9001:9001"]
+    networks:
+      lake:
+        # Endpoint of DuckDB's fail-closed fallback secret: a request that reaches RustFS under this
+        # name was sent without the table's vended credentials (see loader/duck.py).
+        aliases: [s3-unscoped]
+
+  # ------------------------------------------------------------ catalog
+  polaris-db:
+    image: postgres:17
+    environment: {POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}", POSTGRES_DB: polaris}
+    volumes:
+      - polaris-db:/var/lib/postgresql/data
+      - ./postgres/polaris-init.sql:/docker-entrypoint-initdb.d/polaris-init.sql:ro
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres -d polaris"], interval: 2s, retries: 30}
+    networks: [lake]
+
+  polaris-admin:
+    image: apache/polaris-admin-tool:1.8.0
+    environment: &polaris-db
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-db:5432/polaris
+      QUARKUS_DATASOURCE_USERNAME: postgres
+      QUARKUS_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
+    # Exits 0 when the realm already exists, so `make up` stays idempotent.
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        java -jar /deployments/polaris-admin-tool.jar bootstrap --realm=POLARIS
+        --credential=POLARIS,root,${POLARIS_ROOT_SECRET} || echo "realm already bootstrapped"
+    depends_on: {polaris-db: {condition: service_healthy}}
+    networks: [lake]
+
+  polaris:
+    image: apache/polaris:1.8.0
+    environment:
+      <<: *polaris-db
+      POLARIS_REALM_CONTEXT_REALMS: POLARIS
+      QUARKUS_OTEL_SDK_DISABLED: "true"
+      AWS_REGION: us-east-1
+      # Polaris's own S3 access (metadata files, STS calls) uses the RustFS admin key.
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      # Name the principal and table in every vended STS session (CloudTrail attribution on AWS).
+      polaris.features."SESSION_NAME_FIELDS_IN_SUBSCOPED_CREDENTIAL": "[\"principal\",\"table\"]"
+      # Purges (drop with purge) run as background tasks; many at once stalled commits for 90 s and
+      # led to a commit being sent twice (loader/duck.py). Few tasks at a time, a larger pool.
+      POLARIS_TASKS_MAX_CONCURRENT_TASKS: "2"
+      # The JVM sizes its heap from the VM's memory, not its share of it: under load the kernel
+      # killed Polaris for memory. A fixed heap; long GC pauses near the limit also stall commits.
+      JAVA_OPTS_APPEND: "-Xmx1536m"
+      QUARKUS_DATASOURCE_JDBC_MAX_SIZE: "40"
+    depends_on:
+      polaris-admin: {condition: service_completed_successfully}
+      rustfs: {condition: service_healthy}
+    healthcheck: {test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8182/q/health"], interval: 2s, retries: 90, start_period: 10s}
+    ports: ["8181:8181", "8182:8182"]
+    networks: [lake]
+
+  # ------------------------------------------------------------ state
+  # Manifest, table locks, key vault and identity map (DynamoDB on AWS).
+  dynamodb:
+    image: amazon/dynamodb-local:3.3.1
+    user: root  # writes to the named volume
+    # Its heap defaults to a quarter of the VM's memory; after the benchmarks (millions of
+    # items) the kernel killed it for memory while Doris and Spark were up.
+    command: ["-Xmx1g", "-jar", "DynamoDBLocal.jar", "-sharedDb", "-dbPath", "/data"]
+    volumes: [dynamodb-data:/data]
+    healthcheck: {test: ["CMD-SHELL", "curl --silent --output /dev/null http://127.0.0.1:8000"], interval: 2s, retries: 30}
+    networks: [lake]
+
+  # ------------------------------------------------------------ orchestration
+  prefect-db:
+    image: postgres:17
+    environment: {POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}", POSTGRES_DB: prefect}
+    volumes: [prefect-db:/var/lib/postgresql/data]
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres -d prefect"], interval: 2s, retries: 30}
+    networks: [lake]
+
+  prefect:
+    image: prefecthq/prefect:3.8.8-python3.12
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD}@prefect-db:5432/prefect
+      # The API refuses requests without this (basic auth); every client sends PREFECT_API_AUTH_STRING.
+      PREFECT_SERVER_API_AUTH_STRING: ${PREFECT_API_AUTH_STRING}
+      PREFECT_SERVER_ANALYTICS_ENABLED: "false"
+      PREFECT_UI_API_URL: http://localhost:4200/api
+    depends_on: {prefect-db: {condition: service_healthy}}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health')"]
+      interval: 3s
+      retries: 60
+      start_period: 10s
+    ports: ["4200:4200"]
+    networks: [lake]
+
+  # Runs each flow in its own toolbox container on this network. It needs the Docker socket to
+  # start them; acceptable for a local stack (ECS work pool on AWS).
+  prefect-worker:
+    image: lakehouse-loader/prefect-worker:dev
+    build: {context: prefect-worker}
+    command: ["prefect", "worker", "start", "--pool", "local-docker", "--type", "docker"]
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      PREFECT_API_AUTH_STRING: ${PREFECT_API_AUTH_STRING}
+    volumes: [/var/run/docker.sock:/var/run/docker.sock]
+    depends_on: {prefect: {condition: service_healthy}}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://prefect:4200/api/health')"]
+      interval: 5s
+      retries: 30
+    networks: [lake]
+
+  # ------------------------------------------------------------ table maintenance
+  # Spark Connect (EMR Serverless on AWS). Runs the Iceberg maintenance procedures as the
+  # `maintenance` principal.
+  spark:
+    image: lakehouse-loader/spark:dev
+    build: {context: spark}
+    environment: {SPARK_DRIVER_MEMORY: 1g}
+    volumes: [state:/state:ro]
+    depends_on: {bootstrap: {condition: service_completed_successfully}}
+    healthcheck: {test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/15002'"], interval: 3s, retries: 60, start_period: 10s}
+    ports: ["15002:15002", "4040:4040"]
+    networks: [lake]
+
+  # ------------------------------------------------------------ serving (profile `doris`, on by default)
+  # Heap and memory limits keep the whole stack within a 16 GB machine.
+  doris-fe:
+    image: apache/doris:fe-4.1.4.1
+    profiles: [doris]
+    hostname: doris-fe
+    environment: {FE_SERVERS: "fe1:172.20.90.2:9010", FE_ID: "1"}
+    entrypoint: ["bash", "-c"]
+    command:
+      - sed -i 's/-Xmx8192m -Xms8192m/-XX:-UseContainerSupport -Xmx2048m -Xms1024m/' /opt/apache-doris/fe/conf/fe.conf && exec bash init_fe.sh
+    volumes: [doris-fe:/opt/apache-doris/fe/doris-meta]
+    healthcheck: {test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8030/api/bootstrap | grep -q '\"msg\":\"success\"'"], interval: 5s, retries: 60, start_period: 20s}
+    ports: ["8030:8030", "9030:9030"]
+    networks: {lake: {ipv4_address: 172.20.90.2}}
+
+  doris-be:
+    image: apache/doris:be-4.1.4.1
+    profiles: [doris]
+    hostname: doris-be
+    entrypoint: ["bash", "-c"]
+    # The image's start-up check asks the FE for its backends as root without a password, which
+    # fails once doris-init has set one, so the BE could start only once. The wrapper tries the
+    # password first and no password second (before doris-init has ever run).
+    environment:
+      FE_SERVERS: "fe1:172.20.90.2:9010"
+      BE_ADDR: "172.20.90.3:9050"
+      # Skips the vm.max_map_count >= 2000000 check so no host tuning is needed (fine for a local stack).
+      SKIP_CHECK_ULIMIT: "true"
+      # be.conf gets sys_log_level=WARNING: at INFO the BE logs every vended S3 session token in full
+      # (s3_util.cpp, "create one s3 client").
+      DORIS_ROOT_PASSWORD: ${DORIS_ROOT_PASSWORD}
+    command:
+      - >-
+        echo 'mem_limit=3G' >> /opt/apache-doris/be/conf/be.conf &&
+        echo 'sys_log_level=WARNING' >> /opt/apache-doris/be/conf/be.conf &&
+        printf '#!/bin/sh\nMYSQL_PWD="$$DORIS_ROOT_PASSWORD" /usr/bin/mysql "$$@" 2>/dev/null || /usr/bin/mysql "$$@"\n' > /usr/local/sbin/mysql &&
+        chmod +x /usr/local/sbin/mysql && exec bash entry_point.sh
+    volumes: [doris-be:/opt/apache-doris/be/storage]
+    depends_on: {doris-fe: {condition: service_healthy}}
+    healthcheck: {test: ["CMD-SHELL", "curl --fail --silent http://127.0.0.1:8040/api/health"], interval: 5s, retries: 60, start_period: 20s}
+    networks: {lake: {ipv4_address: 172.20.90.3}}
+
+  # Doris catalogs over Polaris, as `doris_reader` (idempotent).
+  doris-init:
+    <<: *toolbox
+    profiles: [doris]
+    command: ["python", "-m", "stack.bootstrap.doris"]
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+      doris-be: {condition: service_healthy}
+
+  # ------------------------------------------------------------ mock partner API (synthetic data)
+  partner-api:
+    <<: *toolbox
+    command: ["python", "-m", "stack.mock_partner"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 2s
+      retries: 30
+    depends_on: {}
+
+  # Inbound mail for email sources: SMTP on 2525 into raw/inbox/<recipient>/ (SES inbound on AWS).
+  smtp-in:
+    <<: *toolbox
+    command: ["python", "-m", "stack.mail_receiver"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 2525), 2).close()"]
+      interval: 2s
+      retries: 30
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+
+  # Change data capture: a clinic's Postgres, Debezium Server, and the receiver that writes
+  # change files into the raw zone (DMS writes them to S3 directly on AWS).
+  source-pg:
+    image: postgres:17
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=4", "-c", "max_wal_senders=4"]
+    environment: {POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}", POSTGRES_DB: clinic}
+    volumes:
+      - source-pg:/var/lib/postgresql/data
+      - ./source_pg/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U postgres -d clinic"], interval: 2s, retries: 30}
+    ports: ["5433:5432"]
+    networks: [lake]
+
+  cdc-sink:
+    <<: *toolbox
+    command: ["python", "-m", "stack.cdc_sink"]
+    volumes: [state:/state, cdc-spool:/spool]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 2s
+      retries: 30
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+
+  debezium:
+    image: quay.io/debezium/server:3.6.3.Final  # 3.7.0.Final ships without the core transforms (ExtractNewRecordState)
+    environment: {POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"}
+    volumes:
+      - ./debezium/application.properties:/debezium/config/application.properties:ro
+      - debezium:/debezium/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/q/health/ready > /dev/null"]
+      interval: 5s
+      retries: 60
+      start_period: 20s
+    depends_on:
+      source-pg: {condition: service_healthy}
+      cdc-sink: {condition: service_healthy}
+    networks: [lake]
+
+  # Streaming minutes tier: Redpanda (Kafka API; MSK or Kinesis on AWS) and Redpanda Connect,
+  # which writes each topic's events into raw/drops/<topic>/ every few seconds (Firehose on AWS).
+  redpanda:
+    image: redpandadata/redpanda:v26.2.4
+    command:
+      - redpanda start --mode dev-container --smp 1 --memory 512M --overprovisioned
+      - --kafka-addr internal://0.0.0.0:9092 --advertise-kafka-addr internal://redpanda:9092
+      - --pandaproxy-addr internal://0.0.0.0:8082 --advertise-pandaproxy-addr internal://redpanda:8082
+    healthcheck: {test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy:.*true'"], interval: 3s, retries: 60, start_period: 5s}
+    networks: [lake]
+
+  stream-sink:
+    image: redpandadata/connect:4.113.0
+    # Credentials and the bucket come from the bootstrap (a user that may only put into drops/).
+    command: ["run", "--env-file", "/state/stream-sink.env", "/connect.yaml"]
+    volumes: [state:/state:ro, ./stream_sink/connect.yaml:/connect.yaml:ro]
+    healthcheck: {test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:4195/ready"], interval: 3s, retries: 40}
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+    networks: [lake]
+
+  # ------------------------------------------------------------ one-shot setup and tools
+  # Buckets, catalogs, principals, grants and default maintenance policies (idempotent).
+  bootstrap:
+    <<: *toolbox
+    build: {context: .., dockerfile: stack/toolbox/Dockerfile}  # the one build of the loader image
+    pull_policy: build
+    command: ["python", "-m", "stack.bootstrap"]
+    depends_on:
+      redpanda: {condition: service_healthy}
+      polaris: {condition: service_healthy}
+      dynamodb: {condition: service_healthy}
+      prefect: {condition: service_healthy}
+
+  # Benchmarks (bench/): the loader capped like its ECS task on AWS (2 vCPU, 8 GB, no swap), so a
+  # step that breaks here would break there too.
+  bench:
+    <<: *toolbox
+    profiles: [tools]
+    volumes: [state:/state, ..:/app]
+    cpus: 2
+    mem_limit: 8g
+    memswap_limit: 8g
+    environment:
+      <<: *toolbox-env
+      LOADER_DUCKDB_MEMORY_LIMIT: 4GB  # half the cap (DuckDB would take 80%): room for the Python side
+    command: ["sleep", "infinity"]
+
+  # `make test` runs suites here: same network, same endpoints as the loader.
+  toolbox:
+    <<: *toolbox
+    profiles: [tools]
+    volumes: [state:/state, ..:/app]  # the working tree, so edits need no rebuild
+    command: ["sleep", "infinity"]

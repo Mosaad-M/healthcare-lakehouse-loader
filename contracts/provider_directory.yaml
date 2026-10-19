@@ -1,0 +1,14 @@
+# The full provider directory, re-sent weekly. Providers are not patients: no PHI.
+source: provider_directory
+entity: providers
+owner: data-platform@example.org
+format: {type: csv, delimiter: ",", header: true}
+columns:
+  - {name: npi, type: string, phi: none}
+  - {name: provider_name, type: string, phi: none}
+  - {name: specialty, type: string, phi: none}
+  - {name: state, type: string, phi: none}
+  - {name: active, type: boolean, phi: none}
+primary_key: [npi]
+silver: {semantics: snapshot}
+poll_seconds: 300

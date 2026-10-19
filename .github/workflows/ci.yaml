@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Catalog conformance and access control on every pull request, without Doris.
+  catalog:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROFILES: ""
+      LOADER_PAUSE_SCHEDULES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start the stack (no Doris)
+        run: make up
+      - name: Let the toolbox write the mounted checkout
+        # The toolbox runs as uid 10001; the checkout and .env (made by `make up`) belong
+        # to the runner.
+        run: chmod -R a+rwX .
+      - name: Verify
+        run: make verify ARGS="-m 'not doris'"
+      - name: Service logs on failure
+        if: failure()
+        run: |
+          docker compose -f stack/compose.yaml --env-file .env logs --tail 80
+          mkdir -p service-logs
+          for svc in $(docker compose -f stack/compose.yaml --env-file .env ps -a --services); do
+            docker compose -f stack/compose.yaml --env-file .env logs --no-color --timestamps "$svc" > "service-logs/$svc.log" 2>&1
+          done
+          # RustFS logs to files inside its container, not to stdout.
+          docker compose -f stack/compose.yaml --env-file .env cp rustfs:/logs service-logs/rustfs-files || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: {name: service-logs-catalog, path: service-logs/, if-no-files-found: ignore}
+
+  # Scanners on every pull request: dependencies, secrets in history, SAST, IaC, images.
+  security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}  # gitleaks scans the whole history
+      - uses: astral-sh/setup-uv@v6
+      - name: Scan
+        run: make scan
+
+  # The whole stack from a clean checkout, Doris included.
+  full:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      LOADER_PAUSE_SCHEDULES: "1"
+    steps:
+      - name: Free disk space for the Doris images
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+      - uses: actions/checkout@v4
+      - name: Pull images
+        run: python3 scripts/make_env.py && docker compose -f stack/compose.yaml --env-file .env --profile doris pull --ignore-buildable --quiet
+      - name: Start the stack
+        run: make up
+      - name: Let the toolbox write the mounted checkout
+        # The toolbox runs as uid 10001; the checkout and .env (made by `make up`) belong
+        # to the runner.
+        run: chmod -R a+rwX .
+      - name: Verify
+        run: make verify
+      - name: Service logs on failure
+        if: failure()
+        run: |
+          docker compose -f stack/compose.yaml --env-file .env --profile '*' logs --tail 80
+          mkdir -p service-logs
+          for svc in $(docker compose -f stack/compose.yaml --env-file .env --profile '*' ps -a --services); do
+            docker compose -f stack/compose.yaml --env-file .env --profile '*' logs --no-color --timestamps "$svc" > "service-logs/$svc.log" 2>&1
+          done
+          docker compose -f stack/compose.yaml --env-file .env cp rustfs:/logs service-logs/rustfs-files || true
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: {name: service-logs-full, path: service-logs/, if-no-files-found: ignore}

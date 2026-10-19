@@ -1,0 +1,289 @@
+# healthcare-lakehouse-loader
+
+Load regulated health data into an Apache Iceberg lakehouse, on a laptop with one command or in
+AWS. Files from outside sources are kept exactly as received, validated against a per-source
+contract, encrypted at the identifier level, and loaded by **DuckDB** into Iceberg tables (Bronze,
+Silver, Gold) through the **Apache Polaris** catalog. **Apache Spark** maintains the tables,
+**Apache Doris** serves them, and **Prefect** orchestrates everything.
+
+![Architecture](docs/architecture.png)
+
+**Synthetic data only.** The stack generates its own fake members, claims and lab results. Never
+put real PHI in it.
+
+## Highlights
+
+- **A contract per source, nothing else.** A YAML file declares format, columns, PHI classes, the
+  primary key and how Silver absorbs a batch. Adding a file-drop source needs only that file.
+- **Five ways in:** file drops, partner HTTP APIs, email attachments, change data capture and
+  event streams, all converging on the same pipeline.
+- **Identifiers encrypted before Bronze**, per subject, with AES-256-GCM. **Erasure is
+  crypto-shredding**: delete one key and every copy of a person's identifiers, in every layer,
+  snapshot and backup, becomes unreadable at once.
+- **Least privilege by construction.** Every engine reaches storage only with credentials the
+  catalog vends for one table; bucket policies refuse everything else.
+- **Idempotent and self-healing.** Every step is replayable by batch; a writer that finds a lost
+  data file repairs its table before continuing.
+- **Measured.** Benchmarks locally and on AWS, each step capped like the production task, with the
+  cost at a mid-size payer's volume.
+
+## Quick start
+
+Needs Docker with about 8 GB of memory for containers, Python 3 on the host, and `make`.
+
+```sh
+make up       # build images, start everything, wait until healthy
+make demo     # drop synthetic files for three example sources and load them
+make verify   # run every test suite
+make down     # stop (keeps data); `make clean` also deletes volumes
+```
+
+`COMPOSE_PROFILES= make up` starts everything except Doris. `make test ARGS="tests/access -q"`
+runs one suite. Local secrets (master key, identity pepper, passwords) are generated into `.env` on
+the first `make up`.
+
+## How a file gets loaded
+
+Each source has a contract in `contracts/`: file format, columns with their Iceberg type and PHI
+class (`none`, `phi` or `identifier`; unclassified means `phi`), columns to drop, the primary key,
+and how Silver absorbs a batch (`append`, `snapshot`, `window` or `cdc`).
+
+1. **Drop.** A file arrives in `raw/drops/<source>/`. The source's Prefect deployment polls on the
+   contract's interval.
+2. **Land.** The bytes are copied unchanged to `raw/landed/<source>/<entity>/ingest_date=/batch_id=/`.
+   The batch ID comes from the content hash, so a re-dropped file is a no-op. Original file names
+   are never kept, only their hash: partners put patient names in them.
+3. **Bronze.** DuckDB validates the file against the contract (declared columns only, types,
+   primary key) and drops what the contract drops. A bad file goes to `raw/quarantine/` with a
+   reason that names columns and counts, never values. Otherwise identifiers are encrypted and the
+   batch replaces any earlier copy of itself in Bronze, in one transaction.
+4. **Silver.** The batch is applied per the contract's semantics, in one transaction.
+5. Every step is recorded in a DynamoDB manifest, and every table write holds that table's lease
+   lock. Reruns are idempotent, and `pipeline.replay` rebuilds both layers from the raw zone.
+
+Each source writes with its own Polaris principal, granted only its two tables.
+
+### Sources
+
+How data arrives (`fetch` in the contract) only changes step 1:
+
+| `fetch.kind` | What happens | Example |
+|---|---|---|
+| `file_drop` | The partner drops files | `acme_claims`, `provider_directory`, `lab_results` |
+| `http_api` | The loader requests the last `days_back` days from the partner's API, page by page, and lands all pages as one batch, so a restated window replaces what came before | `acme_encounters` (a mock partner API in the stack) |
+| `email` | Attachments from allowed senders, delivered to the contract's mailbox (SES inbound on AWS, an SMTP receiver locally), are dropped; message bodies and attachment names are never kept; other mail is quarantined | `acme_lab_mail` |
+| `staged` (CDC) | A capture tool (AWS DMS, or Debezium locally) writes change files to its own staging bucket; each fetch moves them into the drop prefix. Silver's `cdc` semantics apply the latest change per key, deletes included, and ignore stale changes | `acme_clinic_patients` |
+| `stream` | Events published to the source's topic are written into its drop prefix in small files (Redpanda Connect every 10 seconds locally, Firehose on AWS); delivery is at least once, and repeats load once | `acme_vitals` |
+
+API tokens come from `.env` locally and Secrets Manager on AWS; they never appear in contracts,
+errors or logs.
+
+## Identifiers, erasure and re-identification
+
+- **Subjects and people.** A contract that keeps identifier columns names a subject key (such as
+  `member_id`). The identity service maps it, through a blind index (HMAC with a secret pepper), to a
+  random per-source `subject_id`; a `person_id` links subjects believed to be the same person.
+  Linking and splitting never touch lake data.
+- **Encryption.** Each subject has its own AES-256 data key, wrapped by its source's
+  key-encryption key, itself wrapped by the master key (KMS on AWS). Every identifier value is
+  encrypted with AES-256-GCM, bound to its subject and column. A batch makes one KMS request,
+  however many members it mentions.
+- **Erasure.** `python -m loader.cli shred --person <id> ...` writes a write-once journal entry
+  (S3 Object Lock), deletes the person's keys and identity entries, and deletes the raw files that
+  mentioned them. Nothing in the lake is rewritten: what remains is unreadable.
+- **Backups cannot undo a shred.** A vault restore locks the vault, re-applies the whole journal,
+  and only then serves keys.
+- **Re-identification is narrow and audited.** `python -m loader.cli reidentify ...` takes named
+  subjects, a role and a purpose, checks them against policy (`decrypt_policy` in
+  `stack/bootstrap/model.json`), caps subjects per call, and records every call, allowed or
+  refused, write-once, before anything is decrypted. Values are never logged.
+- **The raw zone expires** after 30 days: it holds plaintext and cannot be shredded per subject.
+
+## Gold and serving
+
+- **Gold** is a dbt project (`dbt/`) on DuckDB that reads Silver and writes only Gold. dbt replaces
+  each table's contents in one transaction.
+  - `deid.gold.claims_monthly`, `provider_activity`, `lab_monthly`: de-identified aggregates;
+    groups of fewer than 11 people are suppressed.
+  - `phi.gold.member_claims`: one row per member for care teams; the member name stays encrypted.
+- **Serving** copies Gold into Doris tables in the same flow that rebuilds Gold, and records which
+  Gold snapshot each copy holds. Encrypted columns stay encrypted.
+- **Doris roles:** `analyst` reads the de-identified copies; `analyst_ma` the same, limited to one
+  state by a row policy; `care_team` reads the member mart without its identifier column. Point
+  lookups on the member mart run at about 10 ms (p95) locally.
+
+## Table maintenance and integrity
+
+Maintenance is declared in Polaris and executed by Spark. Every catalog carries default policies
+(compaction, snapshot expiry, manifest rewrite, orphan removal) that a namespace or table can
+override. The `maintenance/policies` deployment measures each table's health, resolves its
+policies, and runs the actions they call for while holding the table's writer lock (Spark Connect
+locally, EMR Serverless on AWS). Each run is recorded with health before and after.
+
+Every maintenance run first checks that each file a table's current snapshot references exists, and
+a writer checks its own table when a write hits a missing file or a commit succeeded only on a
+retry. A lost file is copied back from its previous version (the lake buckets keep deleted objects
+for 3 days, readable only by a restore role that can do nothing else); otherwise the table is
+rolled back to its newest whole snapshot and the affected batches are loaded again. If no snapshot
+is whole, an operator recreates the table:
+
+    python -m loader.cli check-integrity [--table phi.bronze.<table>] [--repair]
+    python -m loader.cli repair --recreate <source> --layer bronze|silver --yes
+
+## Services
+
+| Service | Role | Host port |
+|---|---|---|
+| `rustfs` | S3-compatible storage: `raw`, `lake-phi`, `lake-deid` and the write-once journal | 9000, 9001 (console) |
+| `polaris` + `polaris-db` | Iceberg REST catalog: catalogs `phi` and `deid`, access control, vended credentials, maintenance policies | 8181 |
+| `dynamodb` | Batch manifest, table locks, key vault, identity map | |
+| `prefect` + `prefect-db` + `prefect-worker` | Orchestration; each flow run gets its own container | 4200 (UI) |
+| `spark` | Spark Connect with the Iceberg runtime, for table maintenance | 15002, 4040 (UI) |
+| `doris-fe` + `doris-be` | Serving | 9030 (MySQL), 8030 |
+| `partner-api` | Mock partner API for `http_api` sources | |
+| `smtp-in` | Inbound mail on port 2525 into the raw zone | |
+| `source-pg` + `debezium` + `cdc-sink` | A clinic's Postgres and change data capture from it | 5433 |
+| `redpanda` + `stream-sink` | Kafka API and the sink that writes events into the raw zone | |
+| `bootstrap`, `doris-init` | One-shot, idempotent setup (`stack/bootstrap/model.json`) | |
+| `toolbox` | The loader image; flows and tests run in it | |
+
+## Running on AWS
+
+`infra/sandbox` (Terraform) builds the production shape at its smallest sizes in one account:
+
+| Part | AWS |
+|---|---|
+| Network | VPC with private subnets in 2 zones, one NAT gateway, S3 and DynamoDB endpoints; egress limited to HTTPS |
+| Storage | Buckets per sensitivity with SSE-KMS (a key each); the lake buckets versioned; the journal bucket with Object Lock |
+| Guardrail | Lake bucket policies admit only the catalog's vending roles, the restore role and break-glass |
+| Catalog and orchestration | Polaris, Prefect and its ECS worker on Fargate (ARM); RDS PostgreSQL; flow runs are Fargate tasks |
+| Keys and state | KMS master key; DynamoDB tables; one Secrets Manager secret per principal |
+| Maintenance | EMR Serverless, one job per maintenance batch |
+| Serving | Doris on one EC2 instance, reachable inside the VPC only |
+| Sources | The mock partner on ECS, DMS from RDS for change data capture, Firehose for streams; email arrives where SES inbound would store it |
+| Audit | CloudTrail data events on the lake buckets; each vended session names its principal and table |
+
+```sh
+cp infra/sandbox/terraform.tfvars.example infra/sandbox/terraform.tfvars   # account and profile
+make sandbox-plan      # terraform plan, saved for review
+make sandbox-apply     # apply the reviewed plan, push images, initialize, bootstrap
+make sandbox-test      # run the test suites as a Fargate task in the VPC
+make sandbox-destroy   # tear everything down and list anything left behind
+```
+
+Terraform refuses any account but the one in `terraform.tfvars`. The sandbox costs about $0.27 an
+hour while it is up. Things only real AWS showed, now handled: DMS needs its own bucket (it lists
+the bucket it writes to), Secrets Manager is eventually consistent (one secret per principal), and
+a secret deleted and re-created at once is refused for a few seconds.
+
+## Performance and cost
+
+Every benchmark step runs in a container capped like the loader's task (2 vCPU, 8 GB), locally
+(`python3 bench/run.py <scenario>`) or as a Fargate task in the sandbox
+(`scripts/sandbox.py bench <scenario>`). Raw results are in `bench/results/`.
+
+| Scenario | AWS | Local |
+|---|---|---|
+| 1M rows in one batch | 28 s, 1.8 GB | 17 s, 1.9 GB |
+| 10M rows in one batch | 299 s, 6.8 GB | 135 s, 6.6 GB |
+| 300,000 new members in one batch | 1,731 s (5.8 ms each) | 1,834 s (6.1 ms each) |
+| 300,000 known members in one batch | 127 s (0.42 ms each) | 137 s |
+| Silver append, 1M-row batches as Silver grows to 10M rows | 25 s per batch, flat | 12 s per batch, flat |
+
+What the numbers say:
+
+- **Batch size is bound by memory.** 10M rows load in 8 GB; 30M do not. Contracts quarantine files
+  over 10M rows or 2 GiB before loading.
+- **Members are bound by the loader's CPU, not DynamoDB.** A new member is several conditional
+  writes; a known one is a batched read. A 5M-member eligibility file spends about 35 minutes on
+  lookups.
+- **Commits slow down without maintenance** (about 9 ms more per earlier commit, as manifests pile
+  up); with the default policies, 500 consecutive batches stayed flat.
+- **Silver merges with random keys** grow with the table (about 0.13 s per batch per million rows);
+  ascending keys and date windows stay flat. Partition by key bucket past a few hundred million
+  rows.
+
+**Cost at a mid-size payer** (5M members, 20 sources, 50M rows a day, 10 TB in Silver), usage that
+grows with data: about **$600 a month**, mostly S3 storage ($480) and DynamoDB ($110). KMS is a few
+dollars, because a batch makes one KMS request instead of one per member. A one-time backfill of
+5M members over 20 sources costs about $275 and about 8 hours with the sources loading in parallel.
+Fixed infrastructure adds about $200 a month at the sandbox's sizes.
+
+## DuckDB
+
+The loader runs DuckDB 1.5.6. `bench/duckdb_compat.py` checks each behaviour below against the
+local stack, so a new version can be judged by running it.
+
+| Behaviour in 1.5.6 | Fixed in 2.0 | How the loader handles it |
+|---|---|---|
+| A commit answered after its HTTP timeout is resent; the resend gets 409, and DuckDB deletes the files of the commit the catalog applied | yes | A 10-minute catalog timeout; writers heal their table at once; integrity checks in maintenance |
+| A failed metadata read aborts the process instead of raising | yes | Retries; higher storage file limits; no core dumps |
+| A table whose `main` reference was removed is still read at its last snapshot | yes | Repair rolls back instead of emptying |
+| Deleting every row still reads every data file | no | Repair by rollback; operator recreate |
+| `MERGE` on Iceberg allows one update or delete action | no | `cdc` semantics as a DELETE then an INSERT, in one transaction |
+| The HTTP log records bearer tokens | no | Logging stays off (tested) |
+| Spill files are unencrypted and go to the working directory | no | Encrypted spill in a private directory |
+| HTTP connections are not reused | yes | Connection caching on |
+
+Anything between DuckDB and Polaris must not give up on a commit before DuckDB does: a load
+balancer in front of Polaris needs an idle timeout above `LOADER_HTTP_TIMEOUT` (600 s).
+
+## Security
+
+[docs/SECURITY.md](docs/SECURITY.md) has the threat model (each threat, its control and the test
+that fails if the control breaks), the cryptography, and the accepted risks. In short:
+
+- Storage is reached only with **credentials Polaris vends for one table**; bucket policies refuse
+  every other identity, whatever its IAM policies say.
+- PHI stays out of Iceberg metadata, logs, errors, spill files and orchestration state; canary
+  values seeded into the data are searched for everywhere they must not be.
+- Flows run without administrator credentials; images run as a non-root user.
+- `make scan` (pip-audit, gitleaks, semgrep, trivy) runs on every pull request.
+
+## Testing
+
+`make verify` runs every suite against the local stack:
+
+| Suite | Covers |
+|---|---|
+| `unit` | Contracts, crypto, Silver semantics against a reference model (property tests), fetch guard, least privilege |
+| `conformance` | Iceberg write semantics, PHI in metadata, spill encryption, a slow catalog commit |
+| `access` | Catalog access control and per-table credential scoping |
+| `identity` | Identity service, key vault, key hierarchy |
+| `pipeline` | Every source end to end, erasure, re-identification, the CLI, PHI leak checks |
+| `serving` | Gold, the Doris copies, roles and row policies, latency |
+| `maintenance` | Policy-driven maintenance and its flow |
+| `faults` | Crash recovery at every step, concurrent runs, lost files and their repair |
+| `smoke` | Services, locks, Prefect authentication |
+| `aws` | The bucket guardrail and CloudTrail attribution (`make sandbox-test`) |
+
+## Roadmap
+
+- **DuckDB 2.0** (planned for October 2026): it fixes the cause of the lost-file failure and the
+  abort on failed metadata reads. Run `bench/duckdb_compat.py`, rebuild the toolbox image, and run
+  `make verify` and the benchmarks.
+- **Google Cloud and Azure.** The storage, key and secret providers are behind one settings layer
+  (`loader/settings.py`); Polaris already vends credentials for GCS and Azure storage.
+- **Per-partner isolation without separate buckets.** A raw-zone storage identity per partner,
+  limited to that partner's prefixes; a KMS master key per partner wrapping its key-encryption
+  keys, which is cheap, gives cryptographic isolation, and makes offboarding a partner one key
+  deletion; and a `partner` field in contracts.
+
+## Repository layout
+
+```
+loader/      the loader: contracts, pipeline, crypto, identity, catalog, maintenance, serving
+flows/       Prefect flows and deployments
+contracts/   one YAML contract per source
+dbt/         Gold models
+stack/       compose file, images, bootstrap, mock sources
+infra/       AWS sandbox (Terraform)
+tests/       test suites (see Testing)
+bench/       benchmarks and their results
+scripts/     stack helpers, the AWS sandbox driver, scanners
+docs/        security, architecture diagram (regenerate with docs/architecture.py)
+```
+
+## License
+
+MIT

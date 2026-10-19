@@ -1,0 +1,25 @@
+# Gold: business tables built with dbt on DuckDB from Silver (through Polaris).
+# Tables are created by the Gold deploy step (loader/gold.py) with their Iceberg properties;
+# dbt only replaces their contents, in one transaction per table (materialization iceberg_replace).
+name: lakehouse_gold
+version: "1.0.0"
+config-version: 2
+profile: lakehouse_gold   # written at run time by loader/gold.py (credentials from the state volume)
+
+model-paths: [models]
+macro-paths: [macros]
+target-path: target
+clean-targets: [target]
+
+vars:
+  # Aggregates in the de-identified catalog suppress groups with fewer people than this.
+  min_cell_size: 11
+
+models:
+  lakehouse_gold:
+    +materialized: iceberg_replace
+    +schema: gold
+    deid:
+      +database: deid
+    phi:
+      +database: phi

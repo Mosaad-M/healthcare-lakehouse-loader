@@ -1,0 +1,22 @@
+# A payer partner drops a CSV of claims daily. Each file restates the last few days of service
+# dates (corrections arrive late), so Silver replaces that date window.
+source: acme_claims
+entity: claims
+owner: data-platform@example.org
+description: Professional claims from the Acme partner feed.
+format: {type: csv, delimiter: ",", header: true}
+columns:
+  - {name: claim_id, type: string, phi: none, description: Partner claim number}
+  - {name: member_id, type: string, phi: identifier, description: Acme member number (the subject key)}
+  - {name: member_ssn, type: string, phi: identifier, action: drop, description: Not needed downstream}
+  - {name: member_name, type: string, phi: identifier, description: Encrypted per subject}
+  - {name: service_date, type: date, phi: phi}
+  - {name: diagnosis_code, type: string, phi: phi, description: ICD-10}
+  - {name: procedure_code, type: string, phi: phi, description: CPT}
+  - {name: provider_npi, type: string, phi: none}
+  - {name: billed_amount, type: "decimal(12,2)", phi: none}
+  - {name: paid_amount, type: "decimal(12,2)", phi: none}
+primary_key: [claim_id]
+silver: {semantics: window, window_column: service_date}
+subject: {key: [member_id]}
+poll_seconds: 60

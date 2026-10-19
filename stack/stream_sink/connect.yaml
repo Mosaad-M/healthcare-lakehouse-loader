@@ -1,0 +1,31 @@
+# The minutes tier's sink (Firehose on AWS): every Kafka topic is a stream source of the same name;
+# each topic's events are written into raw/drops/<topic>/ as one NDJSON file per flush. Offsets are
+# committed only after the file is written, so delivery is at least once (Bronze collapses identical
+# repeats; Silver's append ignores keys it already has). Nothing here logs event contents.
+input:
+  kafka_franz:
+    seed_brokers: ["redpanda:9092"]
+    topics: ['^[a-z][a-z0-9_]*$']  # source names; skips internal topics (leading underscore)
+    regexp_topics: true
+    consumer_group: stream-sink
+    start_from_oldest: true
+    metadata_max_age: 5s  # new sources are picked up within seconds
+
+output:
+  aws_s3:
+    bucket: ${RAW_BUCKET}
+    path: 'drops/${! @kafka_topic }/stream-${! timestamp_unix_nano() }-${! uuid_v4() }.ndjson'
+    endpoint: http://rustfs:9000
+    force_path_style_urls: true
+    region: us-east-1
+    credentials: {id: "${STREAM_SINK_ACCESS_KEY}", secret: "${STREAM_SINK_SECRET_KEY}"}
+    content_type: application/x-ndjson
+    batching:
+      period: ${STREAM_FLUSH_PERIOD:10s}
+      count: 50000
+      processors:
+        - group_by_value: {value: '${! @kafka_topic }'}  # one file per topic, never mixed
+        - archive: {format: lines}
+
+logger: {level: INFO, format: logfmt}
+metrics: {prometheus: {}}

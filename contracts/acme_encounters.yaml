@@ -1,0 +1,25 @@
+# Acme's partner API: encounters for a date window, paged. Acme restates the last few days as
+# corrections arrive, so every fetch asks for the last 7 days and Silver replaces that window.
+source: acme_encounters
+entity: encounters
+owner: data-platform@example.org
+description: Encounters from the Acme partner API (mock in the local stack).
+format: {type: json_pages, records_path: data}
+fetch:
+  kind: http_api
+  url: http://partner-api:8080/v1/encounters
+  token_secret: acme_partner_api
+  days_back: 7
+  pagination: {page_size: 25}
+columns:
+  - {name: encounter_id, type: string, phi: none}
+  - {name: patient_mrn, type: string, phi: identifier, description: The partner's patient MRN (the subject key)}
+  - {name: patient_name, type: string, phi: identifier}
+  - {name: encounter_date, type: date, phi: phi}
+  - {name: facility_id, type: string, phi: none}
+  - {name: diagnosis_code, type: string, phi: phi}
+  - {name: charge_amount, type: "decimal(12,2)", phi: none}
+primary_key: [encounter_id]
+silver: {semantics: window, window_column: encounter_date}
+subject: {key: [patient_mrn]}
+poll_seconds: 300

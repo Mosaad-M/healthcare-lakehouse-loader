@@ -1,0 +1,17 @@
+# A lab sends result events as newline-delimited JSON; each result is final once sent.
+source: lab_results
+entity: results
+owner: data-platform@example.org
+format: {type: ndjson}
+columns:
+  - {name: result_id, type: string, phi: none}
+  - {name: patient_mrn, type: string, phi: identifier, description: The lab's patient MRN (the subject key)}
+  - {name: patient_email, type: string, phi: identifier, description: Encrypted per subject}
+  - {name: collected_at, type: timestamptz, phi: phi}
+  - {name: test_code, type: string, phi: phi, description: LOINC}
+  - {name: value, type: double, phi: phi}
+  - {name: unit, type: string, phi: none}
+primary_key: [result_id]
+silver: {semantics: append}
+subject: {key: [patient_mrn]}
+poll_seconds: 60

@@ -1,0 +1,28 @@
+# Only what the image needs. Local state stays out: Terraform state holds the sandbox's generated
+# secrets, .env holds the local stack's.
+.git
+.venv
+.env
+.env.*
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.hypothesis
+.ruff_cache
+.coverage*
+.up-started
+.gitleaks*
+.semgrep*
+.trivy*
+**/.DS_Store
+**/core
+**/core.[0-9]*
+infra/**/.terraform
+infra/**/*.tfstate*
+infra/**/tfplan
+infra/**/*.tfplan
+infra/**/*.tfvars
+stack/.state
+bench/results
+dbt/logs
+dbt/target

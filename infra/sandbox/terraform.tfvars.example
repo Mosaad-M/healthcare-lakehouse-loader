@@ -1,0 +1,3 @@
+# Copy to terraform.tfvars (git-ignored) and fill in. Terraform refuses any account but this one.
+account_id = "123456789012"
+profile    = "my-sandbox-profile" # an AWS CLI (SSO) profile for that account

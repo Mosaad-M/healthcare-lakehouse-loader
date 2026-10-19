@@ -1,0 +1,23 @@
+# Acme Lab emails a CSV of results each night to a dedicated mailbox. Only its results address
+# counts; anything else sent there is quarantined.
+source: acme_lab_mail
+entity: results
+owner: data-platform@example.org
+description: Lab results mailed as CSV attachments (SES inbound on AWS; a local SMTP receiver here).
+format: {type: csv, delimiter: ",", header: true}
+fetch:
+  kind: email
+  mailbox: acme-lab@inbound.example.org
+  allowed_senders: [results@acmelab.example]
+  attachment_glob: "*.csv"
+columns:
+  - {name: result_id, type: string, phi: none}
+  - {name: patient_mrn, type: string, phi: identifier, description: The lab's patient MRN (the subject key)}
+  - {name: collected_on, type: date, phi: phi}
+  - {name: test_code, type: string, phi: phi, description: LOINC}
+  - {name: value, type: double, phi: phi}
+  - {name: unit, type: string, phi: none}
+primary_key: [result_id]
+silver: {semantics: append}
+subject: {key: [patient_mrn]}
+poll_seconds: 120

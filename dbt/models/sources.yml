@@ -1,0 +1,9 @@
+version: 2
+sources:
+  - name: silver
+    database: phi
+    schema: silver
+    tables:
+      - name: acme_claims__claims
+      - name: provider_directory__providers
+      - name: lab_results__results

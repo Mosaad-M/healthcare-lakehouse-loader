@@ -1,0 +1,11 @@
+version: 2
+# meta.serve: copy into Doris. meta.key: the Doris key and distribution column.
+models:
+  - name: claims_monthly
+    config: {meta: {serve: true, key: service_month}}
+  - name: provider_activity
+    config: {meta: {serve: true, key: provider_npi}}
+  - name: lab_monthly
+    config: {meta: {serve: true, key: test_code}}
+  - name: member_claims
+    config: {meta: {serve: true, key: subject_id}}
