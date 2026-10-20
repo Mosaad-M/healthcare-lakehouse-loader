@@ -87,6 +87,7 @@ def test_a_directory_change_adds_a_version_and_earlier_claims_keep_theirs(s, loa
         ON d.provider_sk = f.provider_sk ORDER BY d.npi LIMIT 1""").fetchone()[0]
     claim_keys = "SELECT DISTINCT provider_sk FROM phi.gold.fact_claim WHERE provider_npi = ? ORDER BY 1"
     before = con.execute(claim_keys, [npi]).fetchall()
+    all_keys = {r[0] for r in con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()}
     current = con.execute("SELECT provider_sk FROM phi.gold.dim_provider WHERE npi = ? AND is_current", [npi]).fetchone()[0]
     changed = f"Changed {run_id}"
     raw.RawZone(s).drop(found["provider_directory"], f"providers_star2_{run_id}.csv",
@@ -101,5 +102,24 @@ def test_a_directory_change_adds_a_version_and_earlier_claims_keep_theirs(s, loa
                        [current]).fetchone() == (new_from, False)
     # The claims' service dates are before the change landed: they keep the versions they had.
     assert con.execute(claim_keys, [npi]).fetchall() == before
+    # The run wrote only what changed: every key from before is still there.
+    assert all_keys <= {r[0] for r in con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()}
     assert new_sk not in {r[0] for r in before}
     assert changed not in {r[0] for r in con.execute("SELECT specialty FROM deid.gold.provider_activity").fetchall()}
+
+
+def test_every_version_carries_its_watermark_columns(s, loaded):
+    """first_seen_at (and ended_by_batch_id on ended versions) are what the next run starts from; a
+    table deployed before they existed is rebuilt on its first run."""
+    con = gold(s)
+    assert con.execute("""SELECT count(*) FROM phi.gold.dim_provider
+        WHERE first_seen_at IS NULL OR source_batch_id IS NULL
+           OR (valid_to IS NOT NULL AND ended_by_batch_id IS NULL)""").fetchone()[0] == 0
+
+
+def test_a_run_with_nothing_new_leaves_the_dimension_as_it_was(s, loaded):
+    con = gold(s)
+    q = "SELECT * FROM phi.gold.dim_provider ORDER BY provider_sk"
+    before = con.execute(q).fetchall()
+    refresh(serve=False)
+    assert gold(s).execute(q).fetchall() == before

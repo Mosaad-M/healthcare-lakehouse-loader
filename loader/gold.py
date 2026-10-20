@@ -93,12 +93,14 @@ def _dbt(args: list[str], profiles: Path):
     return result.result
 
 
-def models(s: Settings, profiles: Path) -> list[Model]:
+def models(s: Settings, profiles: Path, deploying: bool = False) -> list[Model]:
     """Every model, compiled, in dependency order: a model comes after the models it reads, so deploy
-    can create each table before describing a model that reads it."""
+    can create each table before describing a model that reads it. `deploying` compiles with the
+    `gold_deploy` var: a model that reads its own table (dim_provider) then reads an empty, typed
+    stand-in, since the table may not exist yet."""
     import json
 
-    _dbt(["compile"], profiles)
+    _dbt(["compile", *(["--vars", "{gold_deploy: true}"] if deploying else [])], profiles)
     nodes = json.loads((profiles / "target" / "manifest.json").read_text())["nodes"]
     found = {n["unique_id"]: n for n in nodes.values() if n["resource_type"] == "model"}
     ordered, done = [], set()
@@ -161,7 +163,7 @@ def deploy(s: Settings) -> list[Model]:
     ensure_access(root, s)
     with tempfile.TemporaryDirectory() as tmp:
         write_profile(s, Path(tmp))
-        found = models(s, Path(tmp))
+        found = models(s, Path(tmp), deploying=True)
     con = duck.connect(s, "phi", principal=PRINCIPAL, alias="phi")
     duck.attach_polaris(con, s, "deid", principal=PRINCIPAL, alias="deid")
     for model in found:

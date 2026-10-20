@@ -1,7 +1,8 @@
-"""The Gold star schema's core: dim_provider (SCD type 2) and fact_claim. Their compiled dbt SQL runs
-in plain DuckDB over hand-made Bronze and Silver tables (no stack): versions must match what a few
-lines of Python say they should for any sequence of directory snapshots, every claim must find the
-provider version valid on its service date, and the same batches must always give the same keys.
+"""The Gold star schema's core: dim_provider (SCD type 2, incremental) and fact_claim. Their compiled
+dbt SQL runs in plain DuckDB over hand-made Bronze and Silver tables (no stack), dim_provider the way
+the iceberg_upsert materialization runs it. For any sequence of directory snapshots, loaded over any
+sequence of Gold runs, versions must match what a few lines of Python say they should, a key once
+written must never change, and every claim must find the provider version valid on its service date.
 """
 from datetime import date, datetime, timedelta, timezone
 
@@ -20,15 +21,25 @@ ATTRS = st.tuples(st.sampled_from(["Clinic A", "Clinic B"]), st.sampled_from(["c
                   st.sampled_from(["MA", "NY"]), st.booleans())
 SNAPSHOT = st.dictionaries(NPIS, ATTRS, min_size=1, max_size=3)  # one directory file: npi -> attributes
 SETTINGS = settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+A = "1000000001"
+
+
+def compiled(tmp, deploying: bool) -> dict[str, str]:
+    profile = {"lakehouse_gold": {"target": "t", "outputs": {"t": {"type": "duckdb", "path": ":memory:"}}}}
+    (tmp / "profiles.yml").write_text(yaml.safe_dump(profile))
+    return {m.name: m.sql for m in gold.models(None, tmp, deploying=deploying)}
 
 
 @pytest.fixture(scope="module")
 def sql(tmp_path_factory) -> dict[str, str]:
-    """Compiled SQL of every Gold model (dbt compile against a throwaway in-memory profile)."""
-    tmp = tmp_path_factory.mktemp("dbt")
-    profile = {"lakehouse_gold": {"target": "t", "outputs": {"t": {"type": "duckdb", "path": ":memory:"}}}}
-    (tmp / "profiles.yml").write_text(yaml.safe_dump(profile))
-    return {m.name: m.sql for m in gold.models(None, tmp)}
+    """Compiled SQL of every Gold model, as a Gold run compiles it."""
+    return compiled(tmp_path_factory.mktemp("dbt"), deploying=False)
+
+
+@pytest.fixture(scope="module")
+def deploy_sql(tmp_path_factory) -> dict[str, str]:
+    """As Gold deploy compiles it: what the tables are created from."""
+    return compiled(tmp_path_factory.mktemp("dbt_deploy"), deploying=True)
 
 
 def lake() -> duckdb.DuckDBPyConnection:
@@ -53,9 +64,17 @@ def land(con, batch_id: str, landed: datetime, snapshot: dict) -> None:
                     [npi, name, specialty, state, active, batch_id, "f", i, landed])
 
 
-def build(con, sql, *models) -> None:
-    for model in models:
-        con.execute(f"CREATE OR REPLACE TABLE phi.gold.{model} AS {sql[model]}")
+def create_dim(con, deploy_sql) -> None:
+    """What Gold deploy does: an empty table with the model's columns."""
+    con.execute(f"CREATE TABLE phi.gold.dim_provider AS SELECT * FROM ({deploy_sql['dim_provider']}) WHERE false")
+
+
+def run_dim(con, sql) -> int:
+    """What the iceberg_upsert materialization does. Returns the number of rows the run wrote."""
+    con.execute(f"CREATE OR REPLACE TEMP TABLE staged AS {sql['dim_provider']}")
+    con.execute("DELETE FROM phi.gold.dim_provider WHERE provider_sk IN (SELECT provider_sk FROM staged)")
+    con.execute("INSERT INTO phi.gold.dim_provider BY NAME SELECT * FROM staged")
+    return con.execute("SELECT count(*) FROM staged").fetchone()[0]
 
 
 def versions(con) -> list[tuple]:
@@ -81,35 +100,90 @@ def expected_versions(snapshots: list[dict], landed: list[datetime]) -> list[tup
     return sorted(out, key=lambda r: (r[0], r[5]))
 
 
-@given(st.lists(SNAPSHOT, min_size=1, max_size=6))
+@given(st.lists(st.tuples(SNAPSHOT, st.booleans()), min_size=1, max_size=6))
 @SETTINGS
-def test_versions_match_the_reference_model_for_any_sequence_of_snapshots(sql, snapshots):
+def test_versions_match_the_reference_model_for_any_snapshots_over_any_runs(sql, deploy_sql, steps):
+    """Each step lands one snapshot, then Gold runs if the step says so (and always at the end).
+    After every run the table must equal a build over every batch so far, and every key an earlier
+    run wrote must still be there."""
     con = lake()
-    landed = [T0 + timedelta(days=30 * i) for i in range(len(snapshots))]
-    for i, (snap, at) in enumerate(zip(snapshots, landed)):
-        land(con, f"b{i}", at, snap)
-    build(con, sql, "dim_provider")
-    assert versions(con) == expected_versions(snapshots, landed)
-    # Versions of one provider never overlap, and the key is unique.
-    keys = con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()
-    assert len(keys) == len(set(keys))
+    create_dim(con, deploy_sql)
+    snapshots, landed, keys = [], [], set()
+    for i, (snap, run_now) in enumerate(steps):
+        snapshots.append(snap)
+        landed.append(T0 + timedelta(days=30 * i))
+        land(con, f"b{i}", landed[-1], snap)
+        if run_now or i == len(steps) - 1:
+            run_dim(con, sql)
+            assert versions(con) == expected_versions(snapshots, landed)
+            now = {r[0] for r in con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()}
+            assert keys <= now, "a key written by an earlier run changed"
+            keys = now
+    count = con.execute("SELECT count(*), count(DISTINCT provider_sk) FROM phi.gold.dim_provider").fetchone()
+    assert count[0] == count[1]
 
 
-def test_a_rebuild_from_the_same_batches_gives_the_same_keys(sql):
-    first, second = lake(), lake()
-    for con in (first, second):
-        land(con, "b1", T0, {"1000000001": ("Clinic A", "cardiology", "MA", True)})
-        land(con, "b2", T0 + timedelta(days=5), {"1000000001": ("Clinic A", "oncology", "MA", True)})
-        build(con, sql, "dim_provider")
-    q = "SELECT provider_sk, npi, valid_from FROM phi.gold.dim_provider ORDER BY valid_from"
-    assert first.execute(q).fetchall() == second.execute(q).fetchall()
+def test_a_run_with_nothing_new_writes_nothing(sql, deploy_sql):
+    con = lake()
+    create_dim(con, deploy_sql)
+    land(con, "b1", T0, {A: ("Clinic A", "cardiology", "MA", True)})
+    assert run_dim(con, sql) == 1
+    assert run_dim(con, sql) == 0
+    # A later batch identical to the current state changes nothing, however often it is read.
+    land(con, "b2", T0 + timedelta(days=1), {A: ("Clinic A", "cardiology", "MA", True)})
+    assert run_dim(con, sql) == 0
+    assert run_dim(con, sql) == 0
 
 
-def test_each_claim_gets_the_provider_version_valid_on_its_service_date(sql):
+def test_applied_batches_are_not_needed_again(sql, deploy_sql):
+    """What keeping history in Gold is for: once a run has applied batches, Bronze can lose them (a
+    retention policy) and later runs still extend the same history."""
+    con = lake()
+    create_dim(con, deploy_sql)
+    land(con, "b1", T0, {A: ("Clinic A", "cardiology", "MA", True)})
+    land(con, "b2", T0 + timedelta(days=1), {A: ("Clinic A", "oncology", "MA", True)})
+    run_dim(con, sql)
+    first = versions(con)[0]
+    con.execute("DELETE FROM phi.bronze.provider_directory__providers")  # retention removed them
+    land(con, "b3", T0 + timedelta(days=2), {A: ("Clinic A", "pediatrics", "MA", True)})
+    run_dim(con, sql)
+    after = versions(con)
+    assert after[0] == first
+    assert [(r[2], r[8], r[7]) for r in after] == [("cardiology", 1, False), ("oncology", 2, False),
+                                                   ("pediatrics", 3, True)]
+
+
+def test_batches_that_landed_at_the_same_instant_are_both_applied(sql, deploy_sql):
+    con = lake()
+    create_dim(con, deploy_sql)
+    land(con, "b1", T0, {A: ("Clinic A", "cardiology", "MA", True)})
+    run_dim(con, sql)
+    land(con, "b2", T0, {A: ("Clinic A", "oncology", "MA", True)})  # same landed_at, later batch id
+    run_dim(con, sql)
+    assert [r[2] for r in versions(con)] == ["cardiology", "oncology"]
+
+
+def test_a_table_written_before_the_watermark_columns_is_rebuilt_with_the_same_keys(sql, deploy_sql):
+    """Rows from the first, full-rebuild version of the model have no first_seen_at: the next run
+    rebuilds them from Bronze, and every key stays what it was."""
+    con = lake()
+    create_dim(con, deploy_sql)
+    land(con, "b1", T0, {A: ("Clinic A", "cardiology", "MA", True)})
+    land(con, "b2", T0 + timedelta(days=1), {A: ("Clinic A", "oncology", "MA", True)})
+    run_dim(con, sql)
+    q = "SELECT provider_sk, valid_from, valid_to FROM phi.gold.dim_provider ORDER BY valid_from"
+    expected = con.execute(q).fetchall()
+    con.execute("UPDATE phi.gold.dim_provider SET first_seen_at = NULL, ended_by_batch_id = NULL")
+    assert run_dim(con, sql) == 2
+    assert con.execute(q).fetchall() == expected
+    assert con.execute("SELECT count(*) FROM phi.gold.dim_provider WHERE first_seen_at IS NULL").fetchone()[0] == 0
+
+
+def test_each_claim_gets_the_provider_version_valid_on_its_service_date(sql, deploy_sql):
     con = lake()
     t2, t3, t4 = datetime(2026, 3, 1, tzinfo=timezone.utc), datetime(2026, 5, 1, tzinfo=timezone.utc), \
         datetime(2026, 7, 1, tzinfo=timezone.utc)
-    a, b = "1000000001", "1000000002"
+    a, b = A, "1000000002"
     land(con, "b1", T0, {a: ("Clinic A", "cardiology", "MA", True), b: ("Clinic B", "oncology", "NY", True)})
     land(con, "b2", t2, {a: ("Clinic A", "pediatrics", "MA", True), b: ("Clinic B", "oncology", "NY", True)})
     land(con, "b3", t3, {a: ("Clinic A", "pediatrics", "MA", True)})  # b drops out
@@ -119,7 +193,9 @@ def test_each_claim_gets_the_provider_version_valid_on_its_service_date(sql):
     for claim_id, npi, day in claims:
         con.execute("INSERT INTO phi.silver.acme_claims__claims VALUES (?, NULL, NULL, ?, 'I10', '99213', ?, 10, 8, ?, 0, 'cb', ?)",
                     [claim_id, day, npi, f"s-{claim_id}", T0])
-    build(con, sql, "dim_provider", "fact_claim")
+    create_dim(con, deploy_sql)
+    run_dim(con, sql)
+    con.execute(f"CREATE TABLE phi.gold.fact_claim AS {sql['fact_claim']}")
     got = dict(con.execute("""SELECT f.claim_id, d.specialty || '@' || d.version FROM phi.gold.fact_claim f
         LEFT JOIN phi.gold.dim_provider d ON d.provider_sk = f.provider_sk""").fetchall())
     assert got == {
@@ -135,13 +211,16 @@ def test_each_claim_gets_the_provider_version_valid_on_its_service_date(sql):
     assert {r[0] for r in con.execute("SELECT DISTINCT partner FROM phi.gold.dim_provider").fetchall()} == {"npi_registry"}
 
 
-def test_every_column_of_the_core_has_an_iceberg_type(sql):
-    """loader/gold.py deploys each table from DESCRIBE of its SQL; an unmapped type fails the deploy."""
+def test_every_column_of_the_core_has_an_iceberg_type(sql, deploy_sql):
+    """loader/gold.py creates each table from DESCRIBE of its deploy-compiled SQL; an unmapped type
+    fails the deploy. The dimension's run SQL must return the columns it was deployed with."""
     con = lake()
-    build(con, sql, "dim_provider")
+    create_dim(con, deploy_sql)
     for model in ("dim_provider", "fact_claim"):
-        for name, typ, *_ in con.execute(f"DESCRIBE ({sql[model]})").fetchall():
+        for name, typ, *_ in con.execute(f"DESCRIBE ({deploy_sql[model]})").fetchall():
             assert gold.iceberg_type(typ), (model, name)
+    columns = lambda q: sorted(r[:2] for r in con.execute(f"DESCRIBE ({q})").fetchall())  # noqa: E731
+    assert columns(sql["dim_provider"]) == columns(deploy_sql["dim_provider"])
 
 
 def test_every_gold_source_names_its_contracts_partner():
