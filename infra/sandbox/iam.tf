@@ -146,10 +146,11 @@ resource "aws_iam_role" "toolbox_admin_task" {
 
 data "aws_iam_policy_document" "toolbox" {
   statement {
-    sid     = "RawZone" # and DMS's staging bucket, whose files the loader moves into raw/drops/
-    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
-    resources = [aws_s3_bucket.b["raw"].arn, "${aws_s3_bucket.b["raw"].arn}/*",
-    aws_s3_bucket.b["cdc-staging"].arn, "${aws_s3_bucket.b["cdc-staging"].arn}/*"]
+    # Flow runs reach the raw zone only through raw-access, assumed with a session policy that
+    # admits one source's prefixes (loader/partners.py); the task role itself has no raw access.
+    sid       = "RawAccess"
+    actions   = ["sts:AssumeRole"]
+    resources = [aws_iam_role.raw_access.arn]
   }
   statement {
     sid       = "ShredJournalWriteOnce"
@@ -221,6 +222,12 @@ data "aws_iam_policy_document" "toolbox_flow" {
 }
 
 data "aws_iam_policy_document" "toolbox_admin" {
+  statement {
+    sid     = "RawZone" # bootstrap and tests (they play the partners); and DMS's staging bucket
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    resources = [aws_s3_bucket.b["raw"].arn, "${aws_s3_bucket.b["raw"].arn}/*",
+    aws_s3_bucket.b["cdc-staging"].arn, "${aws_s3_bucket.b["cdc-staging"].arn}/*"]
+  }
   statement {
     sid       = "AllSecrets"
     actions   = ["secretsmanager:GetSecretValue"]
@@ -328,6 +335,35 @@ resource "aws_iam_role_policy_attachment" "doris_ssm" {
 resource "aws_iam_instance_profile" "doris" {
   name = "${var.name}-doris"
   role = aws_iam_role.doris.name
+}
+
+# ---------------------------------------------------------------- raw-access (scoped raw-zone sessions)
+# The raw zone and DMS's staging bucket. Never used as is: the loader assumes it with a session policy
+# admitting one source's prefixes (loader/partners.py), so a session reaches only that source.
+resource "aws_iam_role" "raw_access" {
+  name = "${var.name}-raw-access"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{ Effect = "Allow", Action = "sts:AssumeRole",
+    Principal = { AWS = [aws_iam_role.toolbox_task.arn, aws_iam_role.toolbox_admin_task.arn] } }]
+  })
+}
+
+data "aws_iam_policy_document" "raw_access" {
+  statement {
+    actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+    resources = [aws_s3_bucket.b["raw"].arn, "${aws_s3_bucket.b["raw"].arn}/*",
+    aws_s3_bucket.b["cdc-staging"].arn, "${aws_s3_bucket.b["cdc-staging"].arn}/*"]
+  }
+  statement {
+    actions   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+    resources = [aws_kms_key.key["raw"].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "raw_access" {
+  role   = aws_iam_role.raw_access.id
+  policy = data.aws_iam_policy_document.raw_access.json
 }
 
 # ---------------------------------------------------------------- lake-restore (integrity repair)

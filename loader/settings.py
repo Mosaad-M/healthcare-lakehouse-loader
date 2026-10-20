@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 SECRET_PREFIX = "lakehouse/"
+_scoped_cache: dict[str, tuple[dict, float]] = {}  # scoped_storage: scope -> (credentials, expiry)
 # Storage identities that are roles of their own on AWS, assumed from the task's role (env: role ARN).
 # lake-restore copies a lost lake file back from its previous version (loader/integrity.py).
 ASSUMED_ROLES = {"lake-restore": "LOADER_LAKE_RESTORE_ROLE_ARN"}
@@ -76,6 +77,36 @@ class Settings:
         key, secret = (self.s3_access_key, self.s3_secret_key) if who == "admin" else self.storage_user(who)
         return boto3.client("s3", endpoint_url=endpoint, region_name=self.region,
                             aws_access_key_id=key, aws_secret_access_key=secret)
+
+    def scoped_storage(self, buckets: dict[str, list[str]], session: str) -> dict:
+        """Short-lived storage credentials admitting only `buckets` (logical bucket -> prefixes), in
+        the shape Polaris vends (usable with s3() and duckdb_s3_secret()). STS AssumeRole with a
+        session policy: the raw-access role on AWS (LOADER_RAW_ACCESS_ROLE_ARN), RustFS locally as the
+        loader-raw storage user. Cached per scope for most of their hour."""
+        import time
+
+        import boto3
+
+        from loader import partners
+
+        physical = {self.bucket(b): sorted(p) for b, p in buckets.items()}
+        cache_key = json.dumps(physical, sort_keys=True)
+        cached = _scoped_cache.get(cache_key)
+        if cached and cached[1] > time.time():
+            return cached[0]
+        if self.is_aws:
+            sts, role = boto3.client("sts", region_name=self.region), os.environ["LOADER_RAW_ACCESS_ROLE_ARN"]
+        else:
+            key, secret = self.storage_user("loader-raw")
+            sts = boto3.client("sts", endpoint_url=self.s3_endpoint, region_name=self.region,
+                               aws_access_key_id=key, aws_secret_access_key=secret)
+            role = "arn:aws:iam::000000000000:role/raw-access"  # RustFS scopes by the session policy alone
+        creds = sts.assume_role(RoleArn=role, RoleSessionName=f"raw-{session}"[:64], DurationSeconds=3600,
+                                Policy=partners.session_policy(physical, kms=self.is_aws))["Credentials"]
+        vended = {"s3.access-key-id": creds["AccessKeyId"], "s3.secret-access-key": creds["SecretAccessKey"],
+                  "s3.session-token": creds["SessionToken"]}
+        _scoped_cache[cache_key] = (vended, time.time() + 2700)
+        return vended
 
     def duckdb_s3_secret(self, name: str, scope: str, who: str | dict = "admin") -> str:
         """CREATE SECRET for DuckDB with the same identity rules as s3()."""
@@ -183,6 +214,13 @@ class Settings:
         import boto3
 
         return boto3.client("secretsmanager", region_name=self.region)
+
+    def partner_keys(self):
+        """Each partner's master key (loader/partner_keys.py): KMS on AWS, the state volume locally."""
+        from loader import partner_keys
+
+        prefix = os.environ.get("LOADER_PARTNER_KEY_ALIAS_PREFIX")
+        return partner_keys.KmsPartnerKeys(self.region, prefix) if prefix else partner_keys.LocalPartnerKeys(self.state_dir)
 
     def key_provider(self):
         """KMS on AWS (LOADER_MASTER_KMS_KEY), the local key from .env otherwise."""

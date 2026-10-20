@@ -22,3 +22,6 @@ output "artifacts_bucket" { value = aws_s3_bucket.b["artifacts"].id }
 output "bucket_prefix" { value = local.bucket_prefix }
 output "doris_instance" { value = aws_instance.doris.id }
 output "emr_application" { value = aws_emrserverless_application.spark.id }
+
+output "partner_deletion_role" { value = aws_iam_role.partner_deletion.arn }
+output "partner_keys" { value = { for p, a in aws_kms_alias.partner : p => a.name } }

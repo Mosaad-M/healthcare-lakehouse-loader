@@ -8,6 +8,12 @@
     python -m loader.cli repair --recreate acme_claims --layer bronze --yes     (operator, root)
     python -m loader.cli vault-backup > backup.json
     python -m loader.cli vault-restore backup.json
+    python -m loader.cli rewrap-keks                       move KEKs under their partner's master key
+    python -m loader.cli partner freeze <p> --actor me@example.org --reason contract_ended   (reversible)
+    python -m loader.cli partner unfreeze <p> --actor me@example.org --reason reinstated
+    python -m loader.cli partner report <p> [--out report.json]            what a delete would remove
+    python -m loader.cli partner delete <p> --request <ticket> --approver a@example.org \
+        --approver b@example.org --report-hash <hash> --gold drop|keep --actor me@example.org
 
 Output never includes identifier values except from `reidentify`, which is audited.
 """
@@ -49,6 +55,17 @@ def main(argv: list[str] | None = None) -> None:
     rec.add_argument("--recreate", required=True, help="the source whose table to recreate")
     rec.add_argument("--layer", choices=["bronze", "silver"], required=True)
     rec.add_argument("--yes", action="store_true", help="confirm: the table is dropped and reloaded from raw")
+    sub.add_parser("rewrap-keks", help="move KEKs wrapped by the shared master key under their partner's key")
+    part = sub.add_parser("partner", help="offboarding: freeze, unfreeze, report, delete (loader/offboarding.py)")
+    part.add_argument("action", choices=["freeze", "unfreeze", "report", "delete"])
+    part.add_argument("partner")
+    part.add_argument("--actor")
+    part.add_argument("--reason")
+    part.add_argument("--out", help="report: write it here instead of printing it")
+    part.add_argument("--request", help="delete: the approval ticket")
+    part.add_argument("--approver", action="append", default=[], help="delete: an approver (two, different)")
+    part.add_argument("--report-hash", help="delete: the hash of the approved report")
+    part.add_argument("--gold", choices=["drop", "keep"], help="delete: drop or keep Gold built from the partner's data")
     sub.add_parser("vault-backup")
     restore = sub.add_parser("vault-restore")
     restore.add_argument("backup")
@@ -94,6 +111,33 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit("recreating drops the table and reloads every batch from the raw zone; add --yes")
         contract = contracts.load_all(Path(args.contracts_dir))[args.recreate]
         print(json.dumps(integrity.recreate(s, contract, args.layer)))
+    elif args.command == "rewrap-keks":
+        partner_of = {c.source: c.partner for c in contracts.load_all(Path(args.contracts_dir)).values()}
+        print(json.dumps(KeyVault(s).rewrap_keks(partner_of)))
+    elif args.command == "partner":
+        from loader import offboarding
+
+        all_contracts = contracts.load_all(Path(args.contracts_dir))
+        try:
+            if args.action in ("freeze", "unfreeze"):
+                if not (args.actor and args.reason):
+                    sys.exit(f"{args.action} needs --actor and --reason")
+                act = offboarding.freeze if args.action == "freeze" else offboarding.unfreeze
+                out = act(s, args.partner, all_contracts, args.actor, args.reason)
+            elif args.action == "report":
+                out = offboarding.report(s, args.partner, all_contracts, actor=args.actor or "report")
+                if args.out:
+                    Path(args.out).write_text(json.dumps(out, indent=2) + "\n")
+                    out = {"report_hash": out["report_hash"], "written": args.out}
+            else:
+                missing = [f for f in ("request", "report_hash", "gold", "actor") if not getattr(args, f)]
+                if missing:
+                    sys.exit("delete needs " + ", ".join("--" + m.replace("_", "-") for m in missing))
+                out = offboarding.delete(s, args.partner, all_contracts, args.request, args.approver, args.report_hash,
+                                         args.gold, args.actor)
+        except (offboarding.Refused, offboarding.NeedsKeyDeletion) as err:
+            sys.exit(f"refused: {err}")
+        print(json.dumps(out, indent=2, default=str))
     elif args.command == "vault-backup":
         print(KeyVault(s).backup())
     elif args.command == "vault-restore":

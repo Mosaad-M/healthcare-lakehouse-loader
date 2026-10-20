@@ -21,7 +21,10 @@ put real PHI in it.
   crypto-shredding**: delete one key and every copy of a person's identifiers, in every layer,
   snapshot and backup, becomes unreadable at once.
 - **Least privilege by construction.** Every engine reaches storage only with credentials the
-  catalog vends for one table; bucket policies refuse everything else.
+  catalog vends for one table; every load reaches the raw zone only with credentials for its own
+  source's files; bucket policies refuse everything else.
+- **Partners isolated without separate buckets**, each with its own master key. A partner can be
+  frozen at once and reversibly, and its data deleted only after an approved, recorded sign-off.
 - **Idempotent and self-healing.** Every step is replayable by batch; a writer that finds a lost
   data file repairs its table before continuing.
 - **Measured.** Benchmarks locally and on AWS, each step capped like the production task, with the
@@ -44,9 +47,9 @@ the first `make up`.
 
 ## How a file gets loaded
 
-Each source has a contract in `contracts/`: file format, columns with their Iceberg type and PHI
-class (`none`, `phi` or `identifier`; unclassified means `phi`), columns to drop, the primary key,
-and how Silver absorbs a batch (`append`, `snapshot`, `window` or `cdc`).
+Each source has a contract in `contracts/`: the partner it comes from, file format, columns with
+their Iceberg type and PHI class (`none`, `phi` or `identifier`; unclassified means `phi`), columns
+to drop, the primary key, and how Silver absorbs a batch (`append`, `snapshot`, `window` or `cdc`).
 
 1. **Drop.** A file arrives in `raw/drops/<source>/`. The source's Prefect deployment polls on the
    contract's interval.
@@ -61,7 +64,9 @@ and how Silver absorbs a batch (`append`, `snapshot`, `window` or `cdc`).
 5. Every step is recorded in a DynamoDB manifest, and every table write holds that table's lease
    lock. Reruns are idempotent, and `pipeline.replay` rebuilds both layers from the raw zone.
 
-Each source writes with its own Polaris principal, granted only its two tables.
+Each source writes with its own Polaris principal, granted only its two tables, and reads the raw
+zone with short-lived credentials admitting only its own prefixes (an STS session policy: against a
+raw-access role on AWS, against RustFS locally).
 
 ### Sources
 
@@ -85,9 +90,9 @@ errors or logs.
   random per-source `subject_id`; a `person_id` links subjects believed to be the same person.
   Linking and splitting never touch lake data.
 - **Encryption.** Each subject has its own AES-256 data key, wrapped by its source's
-  key-encryption key, itself wrapped by the master key (KMS on AWS). Every identifier value is
-  encrypted with AES-256-GCM, bound to its subject and column. A batch makes one KMS request,
-  however many members it mentions.
+  key-encryption key, itself wrapped by its partner's master key (a KMS key per partner on AWS).
+  Every identifier value is encrypted with AES-256-GCM, bound to its subject and column. A batch
+  makes one KMS request, however many members it mentions.
 - **Erasure.** `python -m loader.cli shred --person <id> ...` writes a write-once journal entry
   (S3 Object Lock), deletes the person's keys and identity entries, and deletes the raw files that
   mentioned them. Nothing in the lake is rewritten: what remains is unreadable.
@@ -98,6 +103,26 @@ errors or logs.
   `stack/bootstrap/model.json`), caps subjects per call, and records every call, allowed or
   refused, write-once, before anything is decrypted. Values are never logged.
 - **The raw zone expires** after 30 days: it holds plaintext and cannot be shredded per subject.
+
+## Partners and offboarding
+
+Several sources can come from one partner (`partner` in the contract). Each partner has its own
+master key, wrapping the key-encryption keys of all its sources, and its own put-only identity for
+dropping files. Offboarding a partner happens in three steps; deleting its data is a decision for
+leadership and legal, so the irreversible step runs only after their sign-off:
+
+| Step | Command | Effect | Reversible |
+|---|---|---|---|
+| Freeze | `loader.cli partner freeze <p> --actor ... --reason ...` | The partner's master key is disabled, so every identifier of the partner is unreadable in every layer, snapshot, backup and Doris copy at once; its drop identity is disabled, its schedules pause, and its sources stop loading. Can stand indefinitely, for a legal hold | Yes: `partner unfreeze` |
+| Report | `loader.cli partner report <p> --out report.json` | Read-only inventory of everything a delete would remove (tables, rows, raw files, identity and key entries, principals, schedules, Gold models and Doris copies built from the partner's data), as names and counts, with a hash recorded in the journal | n/a |
+| Delete | `loader.cli partner delete <p> --request <ticket> --approver <a> --approver <b> --report-hash <h> --gold drop\|keep --actor ...` | Refuses unless the partner is frozen, two different approvers are named, and a fresh report has the approved hash. Records the approval write-once, then removes the master key, the tables, the raw files, the identity and key entries, the principals and schedules, and (with `--gold drop`) the Gold tables and Doris copies built from the partner's data. Resumes where it stopped if interrupted | No |
+
+On AWS no task can delete a partner's master key: its key policy reserves that for a
+`partner-deletion` role that only the operator's own SSO identity can assume. After approval the
+operator runs `scripts/sandbox.py schedule-key-deletion <partner>`, then the delete; KMS's waiting
+period (30 days) is the last chance to cancel (`cancel-key-deletion`). Gold models that read a
+deleted partner's tables must be changed in dbt before the next Gold run; the report lists them.
+Existing key-encryption keys move under their partner's master key with `loader.cli rewrap-keks`.
 
 ## Gold and serving
 
@@ -155,9 +180,9 @@ is whole, an operator recreates the table:
 |---|---|
 | Network | VPC with private subnets in 2 zones, one NAT gateway, S3 and DynamoDB endpoints; egress limited to HTTPS |
 | Storage | Buckets per sensitivity with SSE-KMS (a key each); the lake buckets versioned; the journal bucket with Object Lock |
-| Guardrail | Lake bucket policies admit only the catalog's vending roles, the restore role and break-glass |
+| Guardrail | Lake bucket policies admit only the catalog's vending roles, the restore role and break-glass; flow runs reach the raw zone only through per-source sessions of a raw-access role; a put-only drop role per partner |
 | Catalog and orchestration | Polaris, Prefect and its ECS worker on Fargate (ARM); RDS PostgreSQL; flow runs are Fargate tasks |
-| Keys and state | KMS master key; DynamoDB tables; one Secrets Manager secret per principal |
+| Keys and state | A KMS master key per partner (deletable only by the partner-deletion role); DynamoDB tables; one Secrets Manager secret per principal |
 | Maintenance | EMR Serverless, one job per maintenance batch |
 | Serving | Doris on one EC2 instance, reachable inside the VPC only |
 | Sources | The mock partner on ECS, DMS from RDS for change data capture, Firehose for streams; email arrives where SES inbound would store it |
@@ -168,10 +193,14 @@ cp infra/sandbox/terraform.tfvars.example infra/sandbox/terraform.tfvars   # acc
 make sandbox-plan      # terraform plan, saved for review
 make sandbox-apply     # apply the reviewed plan, push images, initialize, bootstrap
 make sandbox-test      # run the test suites as a Fargate task in the VPC
+scripts/sandbox.py schedule-key-deletion <partner> --days 7   # each partner, before destroying
 make sandbox-destroy   # tear everything down and list anything left behind
 ```
 
-Terraform refuses any account but the one in `terraform.tfvars`. The sandbox costs about $0.27 an
+Partner master keys refuse deletion to everyone but the partner-deletion role, Terraform included,
+so tearing the sandbox down takes that manual step first, once per partner in `contracts/`: no
+script deletes a partner's key by itself. Terraform refuses any account but the one in
+`terraform.tfvars`. The sandbox costs about $0.27 an
 hour while it is up. Things only real AWS showed, now handled: DMS needs its own bucket (it lists
 the bucket it writes to), Secrets Manager is eventually consistent (one secret per principal), and
 a secret deleted and re-created at once is refused for a few seconds.
@@ -205,7 +234,8 @@ What the numbers say:
 
 **Cost at a mid-size payer** (5M members, 20 sources, 50M rows a day, 10 TB in Silver), usage that
 grows with data: about **$600 a month**, mostly S3 storage ($480) and DynamoDB ($110). KMS is a few
-dollars, because a batch makes one KMS request instead of one per member. A one-time backfill of
+dollars, because a batch makes one KMS request instead of one per member, plus $1 a month per
+partner master key. A one-time backfill of
 5M members over 20 sources costs about $275 and about 8 hours with the sources loading in parallel.
 Fixed infrastructure adds about $200 a month at the sandbox's sizes.
 
@@ -264,10 +294,9 @@ that fails if the control breaks), the cryptography, and the accepted risks. In 
   `make verify` and the benchmarks.
 - **Google Cloud and Azure.** The storage, key and secret providers are behind one settings layer
   (`loader/settings.py`); Polaris already vends credentials for GCS and Azure storage.
-- **Per-partner isolation without separate buckets.** A raw-zone storage identity per partner,
-  limited to that partner's prefixes; a KMS master key per partner wrapping its key-encryption
-  keys, which is cheap, gives cryptographic isolation, and makes offboarding a partner one key
-  deletion; and a `partner` field in contracts.
+- **Partner self-service drops.** Partners' drop identities are roles the sandbox's own tests assume;
+  in production each partner would get an identity in its own account (or SFTP via AWS Transfer
+  Family) with the same put-only scope.
 
 ## Repository layout
 

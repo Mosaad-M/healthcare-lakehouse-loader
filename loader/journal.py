@@ -63,3 +63,22 @@ def decrypt_events(s: Settings, event_id: str, day: datetime | None = None) -> l
         for obj in page.get("Contents", []):
             out.append(json.loads(c.get_object(Bucket=name, Key=obj["Key"])["Body"].read()))
     return out
+
+
+def record_partner_event(s: Settings, partner: str, event: dict) -> str:
+    """A write-once record of a partner freeze, unfreeze, report, approval or delete: who, when, why,
+    the approval and the report hash (no PHI). Written before the action it records."""
+    now = datetime.now(timezone.utc)
+    key = f"partners/{partner}/{now:%Y%m%dT%H%M%S%f}-{event['event']}.json"
+    body = {"partner": partner, "at": now.isoformat(), **event}
+    client(s).put_object(Bucket=bucket(s), Key=key, Body=json.dumps(body, sort_keys=True).encode(),
+                         ContentType="application/json")
+    return key
+
+
+def partner_events(s: Settings, partner: str) -> list[dict]:
+    c, name, out = client(s), bucket(s), []
+    for page in c.get_paginator("list_objects_v2").paginate(Bucket=name, Prefix=f"partners/{partner}/"):
+        for obj in page.get("Contents", []):
+            out.append(json.loads(c.get_object(Bucket=name, Key=obj["Key"])["Body"].read()))
+    return sorted(out, key=lambda e: e["at"])

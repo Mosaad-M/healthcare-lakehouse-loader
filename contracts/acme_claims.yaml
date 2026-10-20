@@ -1,6 +1,7 @@
 # A payer partner drops a CSV of claims daily. Each file restates the last few days of service
 # dates (corrections arrive late), so Silver replaces that date window.
 source: acme_claims
+partner: acme
 entity: claims
 owner: data-platform@example.org
 description: Professional claims from the Acme partner feed.

@@ -32,7 +32,7 @@ def contract(semantics: str) -> Contract:
     if semantics == "cdc":
         cols += [{"name": "op", "type": "string", "phi": "none"}, {"name": "seq", "type": "long", "phi": "none"}]
         silver_spec.update(op_column="op", order_column="seq")
-    return Contract.model_validate({"source": f"prop_{semantics}", "entity": "rows", "owner": "test@example.org",
+    return Contract.model_validate({"source": f"prop_{semantics}", "partner": "prop_partner", "entity": "rows", "owner": "test@example.org",
                                     "format": {"type": "csv"}, "columns": cols, "primary_key": ["id"],
                                     "silver": silver_spec})
 
