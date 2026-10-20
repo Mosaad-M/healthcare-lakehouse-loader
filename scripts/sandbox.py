@@ -7,7 +7,8 @@
     scripts/sandbox.py schedule-key-deletion <partner> [--days 30]   after an approved delete (operator only)
     scripts/sandbox.py cancel-key-deletion <partner>                 within the window
     make sandbox-test      run the suites as an ECS task in the VPC; logs stream here
-    make sandbox-destroy   scale down, terraform destroy, then list anything left behind
+    make sandbox-destroy   scale down, terraform destroy, then list anything left behind; first
+                           schedule-key-deletion for each partner (only that role may delete their keys)
     scripts/sandbox.py run <command...>   run one command as a toolbox task (logs stream here)
     scripts/sandbox.py bench <scenario> [--max N]   a bench/run.py scenario, each step a toolbox task
 

@@ -193,10 +193,14 @@ cp infra/sandbox/terraform.tfvars.example infra/sandbox/terraform.tfvars   # acc
 make sandbox-plan      # terraform plan, saved for review
 make sandbox-apply     # apply the reviewed plan, push images, initialize, bootstrap
 make sandbox-test      # run the test suites as a Fargate task in the VPC
+scripts/sandbox.py schedule-key-deletion <partner> --days 7   # each partner, before destroying
 make sandbox-destroy   # tear everything down and list anything left behind
 ```
 
-Terraform refuses any account but the one in `terraform.tfvars`. The sandbox costs about $0.27 an
+Partner master keys refuse deletion to everyone but the partner-deletion role, Terraform included,
+so tearing the sandbox down takes that manual step first, once per partner in `contracts/`: no
+script deletes a partner's key by itself. Terraform refuses any account but the one in
+`terraform.tfvars`. The sandbox costs about $0.27 an
 hour while it is up. Things only real AWS showed, now handled: DMS needs its own bucket (it lists
 the bucket it writes to), Secrets Manager is eventually consistent (one secret per principal), and
 a secret deleted and re-created at once is refused for a few seconds.
