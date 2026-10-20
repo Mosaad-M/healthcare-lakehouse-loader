@@ -94,7 +94,7 @@ class RawZone:
 
         The drop is deleted by the caller only after the manifest records the batch.
         """
-        # Hashed as it streams: the plaintext file never touches local disk (7.8).
+        # Hashed as it streams: the plaintext file never touches local disk.
         digest, size = hashlib.sha256(), 0
         for chunk in self.s3.get_object(Bucket=self.bucket, Key=drop_key)["Body"].iter_chunks(1 << 20):
             digest.update(chunk)
