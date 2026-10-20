@@ -206,9 +206,10 @@ def unfreeze(s: Settings, partner: str, contracts: dict[str, Contract], actor: s
 # ---------------------------------------------------------------- report
 
 def gold_dependents(sources: list[str]) -> list[dict]:
-    """Gold models built from any of the sources' tables, and their Doris copies: every model that
-    reads one of their Bronze or Silver tables, directly or through other Gold models (a mart built
-    on a fact built on a source). Read from dbt's dependency graph, not from the SQL text."""
+    """Gold models built from any of the sources' tables, and their Doris copies (served models
+    only): every model that reads one of their Bronze or Silver tables, directly or through other
+    Gold models (a mart built on a fact built on a source). Read from dbt's dependency graph, not
+    from the SQL text."""
     from loader import gold
 
     manifest = gold.manifest()
@@ -227,8 +228,9 @@ def gold_dependents(sources: list[str]) -> list[dict]:
     for uid in sorted(reads, key=lambda u: manifest["nodes"][u]["name"]):
         node = manifest["nodes"][uid]
         catalog = node["database"]
+        served = bool(node["config"].get("meta", {}).get("serve"))  # only served models have a Doris copy
         out.append({"model": f"{catalog}.gold.{node['name']}", "reads": sorted(reads[uid]),
-                    "doris_copy": f"serving.{node['name']}", "deidentified": catalog == "deid"})
+                    "doris_copy": f"serving.{node['name']}" if served else None, "deidentified": catalog == "deid"})
     return out
 
 
@@ -417,10 +419,11 @@ def _step_gold(s, partner, sources, contracts, gold) -> dict:
     for d in dependents:
         catalog, namespace, table = d["model"].split(".")
         _drop_table(s, catalog, namespace, table)
-        try:
-            doris.query(doris.connect(), f"DROP TABLE IF EXISTS {d['doris_copy']}")
-        except Exception as err:  # noqa: BLE001 (Doris is optional in the local stack)
-            log.warning("Doris copy %s not dropped: %s", d["doris_copy"], type(err).__name__)
+        if d["doris_copy"]:
+            try:
+                doris.query(doris.connect(), f"DROP TABLE IF EXISTS {d['doris_copy']}")
+            except Exception as err:  # noqa: BLE001 (Doris is optional in the local stack)
+                log.warning("Doris copy %s not dropped: %s", d["doris_copy"], type(err).__name__)
         dropped.append(d["model"])
     return {"dropped": dropped}
 

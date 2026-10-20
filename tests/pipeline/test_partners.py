@@ -141,6 +141,10 @@ def test_gold_models_built_through_other_models_or_from_bronze_are_found():
     assert set(found) == {"phi.gold.dim_provider", "phi.gold.fact_claim", "deid.gold.claims_monthly",
                           "deid.gold.provider_activity"}
     assert found["deid.gold.claims_monthly"] == ["bronze.provider_directory__providers"]
+    # Only served models have a Doris copy: the report must not list copies that do not exist.
+    copies = {d["model"]: d["doris_copy"] for d in offboarding.gold_dependents(["provider_directory"])}
+    assert copies["phi.gold.dim_provider"] is None and copies["phi.gold.fact_claim"] is None
+    assert copies["deid.gold.provider_activity"] == "serving.provider_activity"
 
 
 def test_a_delete_refuses_without_freeze_approvals_or_the_approved_report(s, partners, contracts_dir):
