@@ -60,7 +60,9 @@ to drop, the primary key, and how Silver absorbs a batch (`append`, `snapshot`, 
    primary key) and drops what the contract drops. A bad file goes to `raw/quarantine/` with a
    reason that names columns and counts, never values. Otherwise identifiers are encrypted and the
    batch replaces any earlier copy of itself in Bronze, in one transaction.
-4. **Silver.** The batch is applied per the contract's semantics, in one transaction.
+4. **Silver.** The batch is applied per the contract's semantics, in one transaction. `append` and
+   `cdc` tables are partitioned by a hash bucket of the primary key, so a merge reads only the
+   buckets its keys fall in; existing tables move to that layout by partition evolution on deploy.
 5. Every step is recorded in a DynamoDB manifest, and every table write holds that table's lease
    lock. Reruns are idempotent, and `pipeline.replay` rebuilds both layers from the raw zone.
 
@@ -141,9 +143,11 @@ Existing key-encryption keys move under their partner's master key with `loader.
 
 Maintenance is declared in Polaris and executed by Spark. Every catalog carries default policies
 (compaction, snapshot expiry, manifest rewrite, orphan removal) that a namespace or table can
-override. The `maintenance/policies` deployment measures each table's health, resolves its
-policies, and runs the actions they call for while holding the table's writer lock (Spark Connect
-locally, EMR Serverless on AWS). Each run is recorded with health before and after.
+override. Silver tables with `snapshot` or `window` semantics, which rewrite much of themselves on
+every batch, keep one day of snapshots instead of a week (a table-level policy attached at deploy).
+The `maintenance/policies` deployment measures each table's health, resolves its policies, and runs
+the actions they call for while holding the table's writer lock (Spark Connect locally, EMR
+Serverless on AWS). Each run is recorded with health before and after.
 
 Every maintenance run first checks that each file a table's current snapshot references exists, and
 a writer checks its own table when a write hits a missing file or a commit succeeded only on a
@@ -179,9 +183,10 @@ is whole, an operator recreates the table:
 | Part | AWS |
 |---|---|
 | Network | VPC with private subnets in 2 zones, one NAT gateway, S3 and DynamoDB endpoints; egress limited to HTTPS |
-| Storage | Buckets per sensitivity with SSE-KMS (a key each); the lake buckets versioned; the journal bucket with Object Lock |
+| Storage | Buckets per sensitivity with SSE-KMS (a key each); the lake buckets versioned and in S3 Intelligent-Tiering (automatic tiers only, no retrieval step for readers); the journal bucket with Object Lock |
 | Guardrail | Lake bucket policies admit only the catalog's vending roles, the restore role and break-glass; flow runs reach the raw zone only through per-source sessions of a raw-access role; a put-only drop role per partner |
-| Catalog and orchestration | Polaris, Prefect and its ECS worker on Fargate (ARM); RDS PostgreSQL; flow runs are Fargate tasks |
+| Catalog and orchestration | Polaris, Prefect and its ECS worker on Fargate (ARM); RDS PostgreSQL; flow runs are Fargate Spot tasks (an interrupted run is finished by the next scheduled one) |
+| Cost guardrails | A monthly budget with forecast and actual alerts, and Cost Anomaly Detection on every service (recipients in `terraform.tfvars`) |
 | Keys and state | A KMS master key per partner (deletable only by the partner-deletion role); DynamoDB tables; one Secrets Manager secret per principal |
 | Maintenance | EMR Serverless, one job per maintenance batch |
 | Serving | Doris on one EC2 instance, reachable inside the VPC only |
@@ -237,7 +242,14 @@ grows with data: about **$600 a month**, mostly S3 storage ($480) and DynamoDB (
 dollars, because a batch makes one KMS request instead of one per member, plus $1 a month per
 partner master key. A one-time backfill of
 5M members over 20 sources costs about $275 and about 8 hours with the sources loading in parallel.
-Fixed infrastructure adds about $200 a month at the sandbox's sizes.
+Fixed infrastructure adds about $200 a month at the sandbox's sizes; a production setup with high
+availability adds more.
+
+**At 200 TB** (50M members, 500M rows a day; `python3 bench/report.py --scale --results bench/results/aws`),
+usage that grows with data is about **$3,800 a month** with Intelligent-Tiering and Fargate Spot,
+against about $5,900 without: storage $2,700 instead of $4,700 (assuming a third of the lake in each
+tier), loader compute $18 instead of $60, and DynamoDB about $1,100 for member lookups. Maintenance,
+CloudTrail data events and fixed infrastructure come on top.
 
 ## DuckDB
 
@@ -294,6 +306,13 @@ that fails if the control breaks), the cryptography, and the accepted risks. In 
   `make verify` and the benchmarks.
 - **Google Cloud and Azure.** The storage, key and secret providers are behind one settings layer
   (`loader/settings.py`); Polaris already vends credentials for GCS and Azure storage.
+- **Load only what changed in full-state files** (eligibility-style). A per-source fingerprint finds
+  new, changed and removed rows, so unchanged members skip identity lookups, encryption and Bronze.
+  About $740 a month of DynamoDB on demand at 50M members (less once DynamoDB is provisioned), and a
+  50M-member file loads in minutes instead of about 6 hours. Worth building once a full-state file
+  passes about 10M members. Open: Bronze as deltas or full copies; where the fingerprints live.
+- **DynamoDB provisioned capacity** with reservations once traffic is steady: most of the member
+  lookup cost at scale.
 - **Partner self-service drops.** Partners' drop identities are roles the sandbox's own tests assume;
   in production each partner would get an identity in its own account (or SFTP via AWS Transfer
   Family) with the same put-only scope.

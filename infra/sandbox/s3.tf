@@ -101,6 +101,20 @@ resource "aws_s3_bucket_lifecycle_configuration" "lake" {
     noncurrent_version_expiration { noncurrent_days = local.model.lake_version_days }
     expiration { expired_object_delete_marker = true }
   }
+  # Storage is most of the bill as the lake grows: objects move to Intelligent-Tiering at once and
+  # then between its automatic tiers by how often they are read (Frequent; Infrequent after 30 days
+  # unread; Archive Instant after 90), with no retrieval fees and no change for readers. The
+  # Archive and Deep Archive Access tiers are never enabled: they need a restore before a read.
+  # Objects under 128 KB (Iceberg metadata) are not transitioned and pay no monitoring fee.
+  rule {
+    id     = "intelligent-tiering"
+    status = "Enabled"
+    filter {}
+    transition {
+      days          = 0
+      storage_class = "INTELLIGENT_TIERING"
+    }
+  }
 }
 
 # The lake buckets admit only their Polaris vending role and the operator (break-glass), and

@@ -97,6 +97,13 @@
     ]
   },
   "policy_namespace": "ops",
+  "table_policies": {
+    "short_snapshot_expiry": {
+      "type": "system.snapshot-expiry",
+      "description": "Silver tables whose batches rewrite much of the table (snapshot, window): keep 1 day of snapshots and at least 2.",
+      "content": {"version": "2025-02-03", "enable": true, "config": {"max-snapshot-age-hours": 24, "min-snapshots-to-keep": 2}}
+    }
+  },
   "default_policies": {
     "default_data_compaction": {
       "type": "system.data-compaction",

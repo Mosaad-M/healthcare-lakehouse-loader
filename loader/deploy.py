@@ -56,13 +56,37 @@ def ensure_table_columns(root: Polaris, catalog: str, namespace: str, table: str
     wanted = {k: v for k, v in props.items() if k != "format-version"}
     if any(meta.get("properties", {}).get(k) != v for k, v in wanted.items()):
         updates.append({"action": "set-properties", "updates": wanted})
+    if partition:
+        default = next(sp for sp in meta["partition-specs"] if sp["spec-id"] == meta["default-spec-id"])
+        if not default["fields"]:
+            # Partition evolution: new data uses the new spec; compaction rewrites older files into it.
+            next_id = max(sp["spec-id"] for sp in meta["partition-specs"]) + 1
+            updates += [{"action": "add-spec", "spec": tables.partition_spec(current, partition, spec_id=next_id)},
+                        {"action": "set-default-spec", "spec-id": -1}]
     if updates:
         root.update_table(catalog, namespace, table, updates)
 
 
 def ensure_table(root: Polaris, contract: Contract, layer: str) -> None:
     ensure_table_columns(root, tables.CATALOG, layer, contract.table, tables.columns(contract, layer),
-                         tables.properties(contract, layer), partition=layer if layer == tables.BRONZE else None)
+                         tables.properties(contract, layer), partition=tables.layout(contract, layer))
+    if layer == tables.SILVER and contract.silver.semantics in SHORT_SNAPSHOT_SEMANTICS:
+        attach_table_policy(root, tables.CATALOG, layer, contract.table, "short_snapshot_expiry")
+
+
+# Silver semantics whose batches rewrite much of the table: a week of snapshots would keep up to a
+# week of copies, so they keep one day (stack/bootstrap/model.json table_policies).
+SHORT_SNAPSHOT_SEMANTICS = ("snapshot", "window")
+POLICY_NAMESPACE = "ops"
+
+
+def attach_table_policy(root: Polaris, catalog: str, namespace: str, table: str, policy: str) -> None:
+    """Attach a maintenance policy from the policy namespace to one table; Polaris resolves table >
+    namespace > catalog, so it overrides the catalog default of the same type. A table that already
+    has a table-level policy of that type (this one from an earlier deploy, or an operator's own
+    override) keeps it: Polaris answers 409."""
+    url = root.policy_url(catalog, f"/namespaces/{POLICY_NAMESPACE}/policies/{policy}/mappings")
+    expect(root.rest("PUT", url, {"target": {"type": "table-like", "path": [namespace, table]}}), 204, 200, 409)
 
 
 def ensure_source_principal(root: Polaris, s: Settings, contract: Contract) -> None:
