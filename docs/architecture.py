@@ -58,7 +58,7 @@ def arrow(p, q, color=DATA, dashed=False, both=False, rad=0.0, label=None, loff=
 # Title and legend
 ax.text(2, 114, "healthcare-lakehouse-loader: architecture", fontsize=17, fontweight="bold", color=INK, va="center")
 ax.text(2, 110.2, "Polaris + DuckDB + Doris + Spark + Prefect. Local: RustFS, DynamoDB Local. "
-        "AWS sandbox: S3, ECS, EMR Serverless, KMS.", fontsize=9.5, color="#475569", va="center")
+        "AWS sandbox: S3, ECS Fargate, EMR Serverless, KMS, DMS, Firehose.", fontsize=9.5, color="#475569", va="center")
 lx = 140
 for i, (c, d, t) in enumerate([(DATA, False, "data flow"), (MAINT, False, "maintenance"),
                                 (OPT, True, "optional / later")]):
@@ -83,7 +83,7 @@ for x, w, title, bg, hd in COLS:
 
 # 1. Sources
 src = ["File drops", "Partner APIs", "Email attachments",
-       "Postgres\n(CDC with Debezium)", "Event streams\n(Kafka, Firehose)"]
+       "Postgres\n(CDC: Debezium / DMS)", "Event streams\n(Kafka, Firehose)"]
 for i, t in enumerate(src):
     y = 87 - i * 13
     box(4, y, 22, 10, t, fs=9)
@@ -91,7 +91,7 @@ for i, t in enumerate(src):
 # 2. Capture and landing
 box(34, 84, 26, 13, "Prefect fetch flows\npoll APIs and mailboxes,\nwatch drop folders", fs=9)
 box(34, 33, 26, 13, "Change capture and\nstream sinks: files\nto raw in seconds", fs=9)
-box(34, 52, 26, 26, "Raw zone\nS3 / RustFS\nbytes exactly as received\nencrypted, short expiry\nreplayable", fs=9.5,
+box(34, 52, 26, 26, "Raw zone\nS3 / RustFS\nbytes exactly as received\neach load reaches only\nits own source's files\nencrypted, 30-day expiry\nreplayable", fs=9.5,
     ec="#1f8a78", lw=1.4)
 for i in range(3):
     arrow((26, 92 - i * 13), (34, 90))
@@ -103,7 +103,7 @@ arrow((47, 46), (47, 52))
 # 3. Processing paths
 tag(68, 96.5, "Batch path (default)", DATA)
 box(68, 79, 50, 13, "DuckDB loader (one pinned image)\nvalidate per-source contract, type and map,\n"
-    "encrypt identifiers, surrogate keys, _batch_id", fs=9.5, ec=DATA, lw=1.4)
+    "encrypt identifiers, surrogate keys, _batch_id;\nheals a table that lost a file", fs=9.5, ec=DATA, lw=1.4)
 for i, t in enumerate(["Bronze\n(replace the batch,\none commit)", "Silver\n(append, snapshot,\nwindow, cdc)",
                        "Gold\n(dbt-duckdb\nmodels)"]):
     box(68 + i * 17.5, 64, 15, 11.5, t, fs=8.8, ec=DATA)
@@ -113,8 +113,8 @@ arrow((60, 65), (68, 85.5), rad=-0.2, label="read raw", loff=(2.5, -1))
 arrow((75.5, 79), (75.5, 75.5))
 
 tag(68, 59.5, "Maintenance path", MAINT)
-box(68, 45, 50, 11.5, "Apache Spark (Spark Connect / EMR Serverless)\ncompaction, manifest rewrite, snapshot expiry,\n"
-    "orphan removal; actions chosen from Polaris policies", fs=9.5, ec=MAINT, lw=1.4)
+box(68, 45, 50, 11.5, "Apache Spark (Spark Connect / EMR Serverless)\nintegrity check first; compaction, manifest rewrite,\n"
+    "snapshot expiry, orphan removal; actions chosen\nfrom Polaris policies", fs=9.5, ec=MAINT, lw=1.4)
 
 tag(68, 41, "Fast stream path (optional)", OPT)
 box(68, 33, 50, 6, "Kafka Connect Iceberg sink / Flink into Bronze", fs=9, bold_first=False, dashed=True, ec=OPT)
@@ -124,8 +124,9 @@ box(126, 80, 26, 17, "Apache Polaris\nIceberg REST catalog\nRBAC, vended credent
     "maintenance policies", fs=9.5, ec="#3f8f3a", lw=1.4)
 box(126, 34, 26, 42, "", ec="#3f8f3a", lw=1.4)
 ax.text(139, 72.5, "Iceberg tables", ha="center", va="center", fontsize=9.5, fontweight="bold", color=INK)
-ax.text(139, 69.3, "S3 / RustFS: lake-phi, lake-deid", ha="center", va="center", fontsize=7.8, color=INK)
-for i, t in enumerate(["Bronze (v2)", "Silver (v3, deletion vectors)", "Gold"]):
+ax.text(139, 69.3, "S3 Intelligent-Tiering / RustFS:", ha="center", va="center", fontsize=7.8, color=INK)
+ax.text(139, 67.2, "lake-phi, lake-deid (versioned)", ha="center", va="center", fontsize=7.8, color=INK)
+for i, t in enumerate(["Bronze (v2, by ingest day)", "Silver (v3, by key bucket)", "Gold"]):
     box(128.5, 58 - i * 9.5, 21, 7, t, fs=8.6, bold_first=False, fc="#f6fbf5", ec="#7fb77a")
 ax.text(139, 36.5, "identifiers stored only as ciphertext", ha="center", fontsize=7.5, color="#475569", style="italic")
 arrow((118, 69.75), (126, 66), label="commits", loff=(0, 1.0))
@@ -153,14 +154,15 @@ arrow((152, 92), (188, 91.5), color=OPT, dashed=True, label="vended credentials"
 box(2, 2, 206, 26, "", fc="#f4f5f7", ec="none")
 tag(4, 24.5, "Across all layers", "#334155")
 cross = [
-    "Prefect (self-hosted)\nflows, schedules, retries;\none writer per table",
-    "Identity and keys\nper-subject keys, crypto-shredding,\nshred journal (KMS on AWS)",
-    "Manifest and locks\nDynamoDB (DynamoDB Local):\nbatches, table writer locks",
-    "Access control\nPolaris roles, S3 bucket policies,\nDoris grants and row policies",
-    "Audit\nCloudTrail S3 data events name\nprincipal and table; app logs",
+    "Prefect (self-hosted)\nflows, schedules, retries;\none writer per table;\nFargate Spot on AWS",
+    "Identity and keys\nper-subject keys, wrapped by\nper-source keys, under a\nmaster key per partner (KMS);\ncrypto-shredding",
+    "Partners\nfreeze (reversible),\nreport, and a delete\nonly after approval",
+    "Manifest and locks\nDynamoDB (DynamoDB Local):\nbatches, lease locks,\npartner state",
+    "Access control\nPolaris roles, bucket policies,\nper-source raw sessions,\nDoris grants, row policies",
+    "Audit\nCloudTrail names principal\nand table; write-once journal:\ndecrypts, erasures, partners",
 ]
 for i, t in enumerate(cross):
-    box(4 + i * 41, 5, 38, 14, t, fs=9.5)
+    box(4 + i * 34, 5, 32, 15, t, fs=9.3)
 
 out = Path(__file__).parent
 fig.savefig(out / "architecture.svg", bbox_inches="tight", pad_inches=0.15)

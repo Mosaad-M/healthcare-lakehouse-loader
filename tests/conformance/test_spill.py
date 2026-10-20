@@ -35,7 +35,7 @@ def test_duckdb_http_logging_is_off(s):
 
 def test_an_ingest_leaves_nothing_in_the_shared_temp_directory(s, run_id, contracts_dir, canaries, tmp_path, monkeypatch):
     """Drops are hashed as they stream and Bronze stages in the private spill directory, so the
-    shared temp directory never holds a batch's rows (7.8)."""
+    shared temp directory never holds a batch's rows."""
     import tempfile
     from datetime import date
 
