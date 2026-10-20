@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Security scanners, the same locally (`make scan`) and in CI. Fails on any finding.
 #   pip-audit  locked Python dependencies against known vulnerabilities
-#   gitleaks   secrets anywhere in the git history (.gitleaksignore: reviewed false positives)
+#   gitleaks   secrets anywhere in the git history (reviewed false positives: `gitleaks:allow` on the line)
 #   semgrep    static analysis of the code (nosemgrep comments say why a line is accepted)
 #   trivy      Terraform, Dockerfiles and compose (config), and the built images (vulnerabilities
 #              with a fix available, and secrets); .trivyignore.yaml and #trivy:ignore say why

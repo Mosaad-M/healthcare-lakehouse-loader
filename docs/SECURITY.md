@@ -146,7 +146,7 @@ existing ones (the associated data already binds the KEK ID).
 | trivy | Terraform, Dockerfiles and compose; the built images for fixable HIGH and CRITICAL vulnerabilities and for secrets |
 
 Accepted findings carry their reason where they are accepted (`.trivyignore.yaml`, `#trivy:ignore`,
-`nosemgrep`, `.gitleaksignore`).
+`nosemgrep`, and `gitleaks:allow` on the line).
 
 ## Accepted risks
 

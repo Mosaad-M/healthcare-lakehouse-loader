@@ -170,7 +170,7 @@ def cost_section(results: Path) -> list[str]:
     return lines
 
 
-# A lake ten times the target (P7's mid-size payer), for the 200 TB question. Assumptions, not
+# A lake ten times the mid-size payer target, for the 200 TB question. Assumptions, not
 # measurements: how the lake splits across Intelligent-Tiering's tiers depends on how much of it is
 # read; the default is a third each.
 SCALE = {"lake_tb": 200, "members": 50_000_000, "sources": 20, "eligibility_sources": 2,
