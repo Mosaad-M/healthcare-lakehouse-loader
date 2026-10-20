@@ -24,9 +24,7 @@ import hashlib
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone
-from pathlib import Path
 
 from loader import admin, duck, journal, partner_keys, raw, tables
 from loader.contracts import Contract, Email
@@ -36,7 +34,6 @@ from loader.settings import Settings
 log = logging.getLogger(__name__)
 PARTNERS = "partners"
 ACTIVE, FROZEN, DELETING, DELETED = "active", "frozen", "deleting", "deleted"
-DBT_MODELS = Path(__file__).resolve().parents[1] / "dbt" / "models"
 STEPS = ("master_key", "gold", "tables", "raw", "identity", "access")
 
 
@@ -209,15 +206,31 @@ def unfreeze(s: Settings, partner: str, contracts: dict[str, Contract], actor: s
 # ---------------------------------------------------------------- report
 
 def gold_dependents(sources: list[str]) -> list[dict]:
-    """Gold models that read any of the sources' Silver tables, and their Doris copies."""
+    """Gold models built from any of the sources' tables, and their Doris copies (served models
+    only): every model that reads one of their Bronze or Silver tables, directly or through other
+    Gold models (a mart built on a fact built on a source). Read from dbt's dependency graph, not
+    from the SQL text."""
+    from loader import gold
+
+    manifest = gold.manifest()
+    reads: dict[str, set[str]] = {}  # model id -> the sources' tables it is built from
+    for uid, node in manifest["sources"].items():
+        if not any(node["name"].startswith(f"{src}__") for src in sources):
+            continue
+        table, queue, seen = f"{node['source_name']}.{node['name']}", [uid], set()
+        while queue:
+            for child in manifest["child_map"].get(queue.pop(), []):
+                if child.startswith("model.") and child not in seen:
+                    seen.add(child)
+                    reads.setdefault(child, set()).add(table)
+                    queue.append(child)
     out = []
-    for path in sorted(DBT_MODELS.rglob("*.sql")):
-        reads = set(re.findall(r"source\(\s*'silver'\s*,\s*'([a-z0-9_]+)'\s*\)", path.read_text()))
-        hit = sorted(t for t in reads if any(t.startswith(f"{src}__") for src in sources))
-        if hit:
-            catalog = path.parent.name  # dbt/models/<catalog>/<model>.sql
-            out.append({"model": f"{catalog}.gold.{path.stem}", "reads": hit, "doris_copy": f"serving.{path.stem}",
-                        "deidentified": catalog == "deid"})
+    for uid in sorted(reads, key=lambda u: manifest["nodes"][u]["name"]):
+        node = manifest["nodes"][uid]
+        catalog = node["database"]
+        served = bool(node["config"].get("meta", {}).get("serve"))  # only served models have a Doris copy
+        out.append({"model": f"{catalog}.gold.{node['name']}", "reads": sorted(reads[uid]),
+                    "doris_copy": f"serving.{node['name']}" if served else None, "deidentified": catalog == "deid"})
     return out
 
 
@@ -406,10 +419,11 @@ def _step_gold(s, partner, sources, contracts, gold) -> dict:
     for d in dependents:
         catalog, namespace, table = d["model"].split(".")
         _drop_table(s, catalog, namespace, table)
-        try:
-            doris.query(doris.connect(), f"DROP TABLE IF EXISTS {d['doris_copy']}")
-        except Exception as err:  # noqa: BLE001 (Doris is optional in the local stack)
-            log.warning("Doris copy %s not dropped: %s", d["doris_copy"], type(err).__name__)
+        if d["doris_copy"]:
+            try:
+                doris.query(doris.connect(), f"DROP TABLE IF EXISTS {d['doris_copy']}")
+            except Exception as err:  # noqa: BLE001 (Doris is optional in the local stack)
+                log.warning("Doris copy %s not dropped: %s", d["doris_copy"], type(err).__name__)
         dropped.append(d["model"])
     return {"dropped": dropped}
 

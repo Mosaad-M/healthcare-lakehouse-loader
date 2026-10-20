@@ -7,6 +7,6 @@ select
     cast(count(distinct subject_id) as bigint) as members,
     cast(sum(billed_amount) as decimal(18, 2)) as billed_amount,
     cast(sum(paid_amount) as decimal(18, 2)) as paid_amount
-from {{ source('silver', 'acme_claims__claims') }}
+from {{ ref('fact_claim') }}
 group by all
 having count(distinct subject_id) >= {{ var('min_cell_size') }}

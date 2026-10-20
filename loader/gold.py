@@ -94,15 +94,42 @@ def _dbt(args: list[str], profiles: Path):
 
 
 def models(s: Settings, profiles: Path) -> list[Model]:
-    manifest = _dbt(["compile"], profiles)
-    nodes = [n for n in manifest.nodes.values() if n.resource_type == "model"] if hasattr(manifest, "nodes") else []
-    if not nodes:  # dbt returns RunExecutionResult for compile; read the manifest it wrote
-        import json
+    """Every model, compiled, in dependency order: a model comes after the models it reads, so deploy
+    can create each table before describing a model that reads it."""
+    import json
 
-        data = json.loads((profiles / "target" / "manifest.json").read_text())
-        return [Model(n["name"], n["database"], n["compiled_code"], n["config"].get("meta", {}))
-                for n in data["nodes"].values() if n["resource_type"] == "model"]
-    return [Model(n.name, n.database, n.compiled_code, n.config.meta) for n in nodes]
+    _dbt(["compile"], profiles)
+    nodes = json.loads((profiles / "target" / "manifest.json").read_text())["nodes"]
+    found = {n["unique_id"]: n for n in nodes.values() if n["resource_type"] == "model"}
+    ordered, done = [], set()
+
+    def visit(uid: str, path: tuple = ()) -> None:
+        if uid in done:
+            return
+        if uid in path:
+            raise GoldFailed(f"Gold models depend on each other in a cycle: {', '.join(path)}")
+        parents = [p for p in found[uid]["depends_on"]["nodes"] if p in found]
+        for parent in sorted(parents):
+            visit(parent, (*path, uid))
+        done.add(uid)
+        n = found[uid]
+        ordered.append(Model(n["name"], n["database"], n["compiled_code"], n["config"].get("meta", {})))
+
+    for uid in sorted(found):
+        visit(uid)
+    return ordered
+
+
+def manifest() -> dict:
+    """dbt's parsed manifest (models, sources and the dependency graph), without connecting to
+    anything: the throwaway profile only satisfies dbt's need for one."""
+    import json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        profile = {"lakehouse_gold": {"target": "parse", "outputs": {"parse": {"type": "duckdb", "path": ":memory:"}}}}
+        (Path(tmp) / "profiles.yml").write_text(yaml.safe_dump(profile))
+        _dbt(["parse"], Path(tmp))
+        return json.loads((Path(tmp) / "target" / "manifest.json").read_text())
 
 
 ICEBERG = {"VARCHAR": "string", "BIGINT": "long", "INTEGER": "int", "DOUBLE": "double", "FLOAT": "float",
