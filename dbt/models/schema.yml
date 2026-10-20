@@ -1,6 +1,11 @@
 version: 2
 # meta.serve: copy into Doris. meta.key: the Doris key and distribution column.
+# dim_provider and fact_claim are the person-level core the marts are built from; they are not served.
 models:
+  - name: dim_provider
+    description: Provider directory entries, SCD type 2 (one row per version), rebuilt from Bronze.
+  - name: fact_claim
+    description: One row per claim (current version), with the provider version valid on its service date.
   - name: claims_monthly
     config: {meta: {serve: true, key: service_month}}
   - name: provider_activity

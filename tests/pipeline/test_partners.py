@@ -129,8 +129,18 @@ def test_the_report_lists_what_a_delete_would_remove(s, partners, contracts_dir)
 
 def test_the_gold_models_built_from_a_source_are_found():
     found = {d["model"] for d in offboarding.gold_dependents(["acme_claims"])}
-    assert found == {"deid.gold.claims_monthly", "deid.gold.provider_activity", "phi.gold.member_claims"}
+    assert found == {"phi.gold.fact_claim", "deid.gold.claims_monthly", "deid.gold.provider_activity",
+                     "phi.gold.member_claims"}
     assert {d["model"] for d in offboarding.gold_dependents(["lab_results"])} == {"deid.gold.lab_monthly"}
+
+
+def test_gold_models_built_through_other_models_or_from_bronze_are_found():
+    """dim_provider reads Bronze; fact_claim reads dim_provider; the marts read fact_claim. A delete
+    report that missed any of them would let approvers sign off on less than the delete removes."""
+    found = {d["model"]: d["reads"] for d in offboarding.gold_dependents(["provider_directory"])}
+    assert set(found) == {"phi.gold.dim_provider", "phi.gold.fact_claim", "deid.gold.claims_monthly",
+                          "deid.gold.provider_activity"}
+    assert found["deid.gold.claims_monthly"] == ["bronze.provider_directory__providers"]
 
 
 def test_a_delete_refuses_without_freeze_approvals_or_the_approved_report(s, partners, contracts_dir):

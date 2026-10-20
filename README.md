@@ -123,15 +123,23 @@ On AWS no task can delete a partner's master key: its key policy reserves that f
 `partner-deletion` role that only the operator's own SSO identity can assume. After approval the
 operator runs `scripts/sandbox.py schedule-key-deletion <partner>`, then the delete; KMS's waiting
 period (30 days) is the last chance to cancel (`cancel-key-deletion`). Gold models that read a
-deleted partner's tables must be changed in dbt before the next Gold run; the report lists them.
+deleted partner's tables must be changed in dbt before the next Gold run; the report lists them,
+including models that read them through other Gold models (it follows dbt's dependency graph).
 Existing key-encryption keys move under their partner's master key with `loader.cli rewrap-keks`.
 
 ## Gold and serving
 
-- **Gold** is a dbt project (`dbt/`) on DuckDB that reads Silver and writes only Gold. dbt replaces
-  each table's contents in one transaction.
+- **Gold** is a dbt project (`dbt/`) on DuckDB that reads Silver (and Bronze, where it needs
+  history) and writes only Gold. dbt replaces each table's contents in one transaction, models
+  after the models they read.
+  - A dimensional core in `phi.gold`, not served: `dim_provider`, the provider directory as SCD
+    type 2 (a version per change, rebuilt from the directory snapshots in Bronze; `valid_from` is
+    when the change landed, and a provider's first version is backdated so older claims find it),
+    and `fact_claim`, one row per claim with the key of the provider version valid on its service
+    date. Every row carries its `partner`; facts hold no identifier columns, only `subject_id`.
   - `deid.gold.claims_monthly`, `provider_activity`, `lab_monthly`: de-identified aggregates;
-    groups of fewer than 11 people are suppressed.
+    groups of fewer than 11 people are suppressed. The claim marts are built on the core, so
+    provider activity shows each provider's specialty and state as of the service date.
   - `phi.gold.member_claims`: one row per member for care teams; the member name stays encrypted.
 - **Serving** copies Gold into Doris tables in the same flow that rebuilds Gold, and records which
   Gold snapshot each copy holds. Encrypted columns stay encrypted.

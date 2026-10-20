@@ -1,9 +1,21 @@
 version: 2
+# meta.partner: the contract's partner, carried onto every Gold row built from the table (a test
+# checks it against contracts/). Gold models read Silver (current state) and, where they need
+# history, Bronze (every batch as received).
 sources:
   - name: silver
     database: phi
     schema: silver
     tables:
       - name: acme_claims__claims
+        config: {meta: {partner: acme}}
       - name: provider_directory__providers
+        config: {meta: {partner: npi_registry}}
       - name: lab_results__results
+        config: {meta: {partner: metro_lab}}
+  - name: bronze
+    database: phi
+    schema: bronze
+    tables:
+      - name: provider_directory__providers
+        config: {meta: {partner: npi_registry}}
