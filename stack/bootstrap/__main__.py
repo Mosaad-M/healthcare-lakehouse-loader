@@ -178,6 +178,12 @@ def ensure_policies(root: Polaris) -> None:
             if status not in (200, 409):
                 raise RuntimeError(f"create policy {catalog}.{name}: HTTP {status} {body}")
             expect(root.rest("PUT", f"{base}/{name}/mappings", {"target": {"type": "catalog"}}), 204, 200)
+        for name, policy in MODEL["table_policies"].items():  # attached to single tables at deploy
+            status, body = root.rest("POST", root.policy_url(catalog, f"/namespaces/{ns}/policies"), {
+                "name": name, "type": policy["type"], "description": policy["description"],
+                "content": json.dumps(policy["content"])})
+            if status not in (200, 409):
+                raise RuntimeError(f"create policy {catalog}.{name}: HTTP {status} {body}")
 
 
 def main() -> None:

@@ -30,3 +30,27 @@ variable "journal_retention_days" {
   type        = number
   default     = 1
 }
+
+variable "alert_emails" {
+  description = "Who gets budget and cost-anomaly alerts (terraform.tfvars). Empty: no alerts are created."
+  type        = list(string)
+  default     = []
+}
+
+variable "monthly_budget_usd" {
+  description = "Monthly cost budget: alerts at 80% forecast and 100% actual."
+  type        = number
+  default     = 50
+}
+
+variable "anomaly_alert_usd" {
+  description = "Alert on a cost anomaly whose total impact reaches this many dollars."
+  type        = number
+  default     = 10
+}
+
+variable "create_anomaly_monitor" {
+  description = "An account allows one per-service anomaly monitor; false if it already has one."
+  type        = bool
+  default     = true
+}

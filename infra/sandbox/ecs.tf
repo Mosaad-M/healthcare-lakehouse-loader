@@ -7,6 +7,17 @@ resource "aws_ecs_cluster" "main" {
   name = var.name
 }
 
+# Flow runs use Fargate Spot (about 70% cheaper; flows/deploy.py); services and admin tasks stay on
+# demand (their capacity provider is FARGATE).
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name       = aws_ecs_cluster.main.name
+  capacity_providers = ["FARGATE", "FARGATE_SPOT"]
+  default_capacity_provider_strategy {
+    capacity_provider = "FARGATE"
+    weight            = 1
+  }
+}
+
 resource "aws_cloudwatch_log_group" "main" {
   name              = "/${var.name}/sandbox"
   retention_in_days = 7

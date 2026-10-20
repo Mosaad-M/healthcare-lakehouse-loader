@@ -3,7 +3,12 @@ from loader.contracts import Contract, Phi
 
 CATALOG = "phi"  # every source lands in the PHI catalog; de-identified Gold goes to `deid`
 BRONZE, SILVER = "bronze", "silver"
-SILVER_BUCKETS = 16  # pk_bucket values; Silver is not partitioned until a lookup need is measured
+SILVER_BUCKETS = 16  # pk_bucket values (fixed in the data: changing it rewrites the table)
+# Silver semantics whose merges look keys up across the table: partitioned by pk_bucket, so a batch's
+# merge reads only the buckets its keys fall in (the benchmark: random-key appends grew 0.13 s per
+# batch per million rows in an unpartitioned Silver). snapshot and window rewrite by date or whole.
+BUCKETED_SEMANTICS = ("append", "cdc")
+SILVER_BUCKETED = "silver_bucketed"  # partition_spec layout name
 
 # Bookkeeping columns: never PHI, so they keep full metrics.
 BRONZE_META = [("_batch_id", "string"), ("_source_file", "string"), ("_row_number", "long"),
@@ -52,13 +57,25 @@ def iceberg_schema(cols: list[tuple[str, str]], schema_id: int = 0, existing: di
     return {"type": "struct", "schema-id": schema_id, "fields": fields}
 
 
-def partition_spec(schema: dict, layer: str) -> dict:
-    """Bronze: day(_ingested_at), never a PHI value. Silver: unpartitioned."""
-    if layer != BRONZE:
-        return {"spec-id": 0, "fields": []}
-    source_id = next(f["id"] for f in schema["fields"] if f["name"] == "_ingested_at")
-    return {"spec-id": 0, "fields": [
-        {"source-id": source_id, "field-id": 1000, "transform": "day", "name": "_ingested_at_day"}]}
+def partition_spec(schema: dict, layer: str, spec_id: int = 0) -> dict:
+    """Bronze: day(_ingested_at), never a PHI value. Silver for append and cdc (SILVER_BUCKETED): the
+    pk_bucket value, a hash bucket, never a PHI value. Other Silver: unpartitioned."""
+    if layer == BRONZE:
+        source_id = next(f["id"] for f in schema["fields"] if f["name"] == "_ingested_at")
+        return {"spec-id": spec_id, "fields": [
+            {"source-id": source_id, "field-id": 1000, "transform": "day", "name": "_ingested_at_day"}]}
+    if layer == SILVER_BUCKETED:
+        source_id = next(f["id"] for f in schema["fields"] if f["name"] == "pk_bucket")
+        return {"spec-id": spec_id, "fields": [
+            {"source-id": source_id, "field-id": 1000, "transform": "identity", "name": "pk_bucket"}]}
+    return {"spec-id": spec_id, "fields": []}
+
+
+def layout(contract: Contract, layer: str) -> str | None:
+    """The partition layout of a contract's table in a layer (partition_spec's names)."""
+    if layer == BRONZE:
+        return BRONZE
+    return SILVER_BUCKETED if contract.silver.semantics in BUCKETED_SEMANTICS else None
 
 
 def qualified(contract: Contract, layer: str, alias: str = "ice") -> str:

@@ -56,8 +56,13 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--results", default=str(Path(__file__).parent / "results" / "local"))
     p.add_argument("--out", help="write the summary here instead of printing it")
+    p.add_argument("--scale", action="store_true", help="only the 200 TB scenario (use --results bench/results/aws)")
     a = p.parse_args()
     results = Path(a.results)
+    if a.scale:
+        text = "\n".join(scale_section(results)) + "\n"
+        print(text, end="") if not a.out else Path(a.out).write_text(text)
+        return
     md = ["# Scale and cost benchmarks", "",
           "Local runs, each step in a container capped like the loader's ECS task (2 vCPU, 8 GB, no swap). "
           "Times are local; AWS costs are measured request counts times list prices (bench/cost.py). "
@@ -163,6 +168,52 @@ def cost_section(results: Path) -> list[str]:
              f"${firehose_dollars(50_000_000, 300):,.2f} a day instead of ${50_000_000 * 300 / 1024 ** 3 * PRICES['firehose.gb']:,.2f}.",
              "", "Fixed infrastructure (Polaris and Prefect on Fargate, RDS, NAT gateway, Doris hosts) is separate and does not grow with data.", ""]
     return lines
+
+
+# A lake ten times the target (P7's mid-size payer), for the 200 TB question. Assumptions, not
+# measurements: how the lake splits across Intelligent-Tiering's tiers depends on how much of it is
+# read; the default is a third each.
+SCALE = {"lake_tb": 200, "members": 50_000_000, "sources": 20, "eligibility_sources": 2,
+         "rows_per_day": 500_000_000, "members_per_batch": 2_500_000, "new_members_per_day": 50_000,
+         "avg_object_mb": 256, "tier_mix": {"frequent": 1 / 3, "infrequent": 1 / 3, "archive_instant": 1 / 3}}
+
+
+def scale_section(results: Path, sc: dict = SCALE) -> list[str]:
+    """Monthly cost of a lake at `sc` scale, as built and with Intelligent-Tiering and Fargate Spot,
+    from per-unit usage measured in `results` (use bench/results/aws: it has the key hierarchy)."""
+    rows, known, new = load(results, "rows"), load(results, "known_subjects"), load(results, "new_subjects")
+    ok = lambda rs: [r for r in rs if "wall_s" in r]  # noqa: E731
+    if not (ok(rows) and ok(known) and ok(new)):
+        return ["## AWS cost at scale", "", "Not enough measurements yet.", ""]
+    big = max(ok(rows), key=lambda r: r["params"]["rows"])
+    k = max(ok(known), key=lambda r: r["params"]["known_subjects"])
+    n = max(ok(new), key=lambda r: r["params"]["new_subjects"])
+    per_row = usage(big).scaled(1 / big["params"]["rows"])
+    per_known = usage(k).scaled(1 / k["params"]["known_subjects"])
+    per_new = usage(n).scaled(1 / n["params"]["new_subjects"])
+    mentions = (sc["sources"] - sc["eligibility_sources"]) * sc["members_per_batch"] + sc["eligibility_sources"] * sc["members"]
+    month = (per_row.scaled(sc["rows_per_day"]) + per_known.scaled(mentions) + per_new.scaled(sc["new_members_per_day"])).scaled(30)
+    d, p = month.dollars(), PRICES
+    gb = sc["lake_tb"] * 1024
+    standard = gb * p["s3.gb_month"]
+    mix = sc["tier_mix"]
+    objects = gb * 1024 / sc["avg_object_mb"]
+    tiered = gb * (mix["frequent"] * p["s3it.frequent_gb_month"] + mix["infrequent"] * p["s3it.infrequent_gb_month"]
+                   + mix["archive_instant"] * p["s3it.archive_instant_gb_month"]) + objects / 1000 * p["s3it.monitoring_per_1k_objects"]
+    spot = d["compute"] * (1 - p["fargate.spot_discount"])
+    other = d["s3_requests"] + d["kms"] + d["dynamodb"]
+    rows_out = [["S3 storage", f"${standard:,.0f}", f"${tiered:,.0f}"],
+                ["Loader compute", f"${d['compute']:,.0f}", f"${spot:,.0f}"],
+                ["DynamoDB", f"${d['dynamodb']:,.0f}", f"${d['dynamodb']:,.0f}"],
+                ["S3 requests and KMS", f"${d['s3_requests'] + d['kms']:,.0f}", f"${d['s3_requests'] + d['kms']:,.0f}"],
+                ["**Total (usage)**", f"**${standard + d['compute'] + other:,.0f}**", f"**${tiered + spot + other:,.0f}**"]]
+    return ["## AWS cost at scale (usage, per month)", "",
+            f"{sc['lake_tb']} TB lake, {sc['members']:,} members, {sc['sources']} sources ({sc['eligibility_sources']} full "
+            f"eligibility files), {sc['rows_per_day']:,} rows a day. Storage split across Intelligent-Tiering's tiers: "
+            + ", ".join(f"{t} {share:.0%}" for t, share in mix.items()) + " (an assumption).", "",
+            table(["", "As built before", "With Intelligent-Tiering and Spot"], rows_out), "",
+            "Not included: fixed infrastructure, maintenance (EMR Serverless), CloudTrail data events (they grow with "
+            "reads), and snapshot copies (one day for snapshot and window tables, a week for the rest).", ""]
 
 
 if __name__ == "__main__":

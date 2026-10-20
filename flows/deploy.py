@@ -24,7 +24,10 @@ def job_variables() -> dict:
             "cluster": os.environ["LOADER_ECS_CLUSTER"],
             "task_definition_arn": os.environ["LOADER_TOOLBOX_TASK_FAMILY"],
             "container_name": "toolbox",
-            "launch_type": "FARGATE",
+            # Spot by default: loads, Gold and maintenance are idempotent by batch, so a run stopped by a
+            # Spot interruption (two minutes' notice) is finished by the next scheduled run once its
+            # table lease frees (120 s). LOADER_FLOW_LAUNCH_TYPE=FARGATE runs on demand.
+            "launch_type": os.environ.get("LOADER_FLOW_LAUNCH_TYPE", "FARGATE_SPOT"),
             "vpc_id": os.environ["LOADER_VPC_ID"],  # the ECS worker requires it with network_configuration
             "network_configuration": {"subnets": os.environ["LOADER_SUBNETS"].split(","),
                                       "securityGroups": [os.environ["LOADER_SECURITY_GROUP"]],

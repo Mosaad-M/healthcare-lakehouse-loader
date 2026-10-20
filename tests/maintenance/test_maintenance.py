@@ -28,6 +28,9 @@ STRICT = {
 def attach_strict_policies(s, run_id: str, layer: str, table: str) -> list[str]:
     root, names = Polaris(s), []
     base = root.policy_url(tables.CATALOG, "/namespaces/ops/policies")
+    # A table holds one table-level policy per type: drop the short snapshot expiry that deploy gives
+    # snapshot and window tables, as an operator overriding it would.
+    root.rest("POST", f"{base}/short_snapshot_expiry/mappings", {"target": {"type": "table-like", "path": [layer, table]}})
     for ptype, content in STRICT.items():
         name = f"t{run_id}_{layer}_{ptype.split('.')[-1].replace('-', '_')}"
         expect(root.rest("POST", base, {"name": name, "type": ptype, "content": json.dumps(content)}), 200)

@@ -12,6 +12,14 @@ PRICES = {
     "s3.write_per_1k": 0.005,  # PUT, COPY, POST, LIST
     "s3.read_per_1k": 0.0004,  # GET, HEAD
     "s3.gb_month": 0.023,
+    # S3 Intelligent-Tiering: automatic tiers only (no retrieval fees); objects under 128 KB are not
+    # monitored and stay at the Frequent rate
+    "s3it.frequent_gb_month": 0.023,
+    "s3it.infrequent_gb_month": 0.0125,  # not read for 30 days
+    "s3it.archive_instant_gb_month": 0.004,  # not read for 90 days
+    "s3it.monitoring_per_1k_objects": 0.0025,
+    # Fargate Spot: up to 70% off on-demand Fargate (interruptible, two minutes' notice)
+    "fargate.spot_discount": 0.70,
     # KMS: every wrap (Encrypt) and unwrap (Decrypt) of a subject's data key is one request
     "kms.per_10k": 0.03,
     # DynamoDB on demand: one request unit per item (up to 1 KB written, 4 KB strongly read)
