@@ -150,3 +150,19 @@ def test_a_run_reads_only_the_bronze_files_after_its_watermark(s, loaded):
                for path in re.findall(r"/bronze/provider_directory__providers/data/[^\s\"'?]+\.parquet", message)}
     con.close()
     assert 0 < len(fetched) < files, f"fetched {len(fetched)} of {files} Bronze data files"
+
+
+def test_fact_lab_result_holds_every_result_of_both_labs_once(s, loaded):
+    con = gold(s)
+    silver = sum(con.execute(f"SELECT count(*) FROM phi.silver.{t}").fetchone()[0]
+                 for t in ("lab_results__results", "acme_lab_mail__results"))
+    fact = con.execute("SELECT count(*), count(DISTINCT lab_result_key) FROM phi.gold.fact_lab_result").fetchone()
+    assert fact == (silver, silver)
+    partners = dict(con.execute("SELECT DISTINCT source_name, partner FROM phi.gold.fact_lab_result").fetchall())
+    assert set(partners.items()) <= {("lab_results", "metro_lab"), ("acme_lab_mail", "acme")}
+
+
+def test_lab_monthly_has_lost_its_minimum_and_maximum_columns(s, loaded):
+    """A column removed from a Gold model leaves the Iceberg table at deploy, not just the model."""
+    columns = [r[0] for r in gold(s).execute("DESCRIBE deid.gold.lab_monthly").fetchall()]
+    assert "min_value" not in columns and "max_value" not in columns and "sum_value" in columns

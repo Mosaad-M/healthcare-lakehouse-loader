@@ -22,11 +22,14 @@ def ensure_namespace(root: Polaris, namespace: str) -> None:
 
 
 def ensure_table_columns(root: Polaris, catalog: str, namespace: str, table: str, cols: list[tuple[str, str]],
-                         props: dict[str, str], partition: str | None) -> None:
+                         props: dict[str, str], partition: str | None, drop_missing: bool = False) -> None:
     """Create the table, or add new columns and set properties on an existing one. A type change
     or the format version (fixed at creation) is never changed here.
 
     partition: None (unpartitioned) or a layer name understood by tables.partition_spec.
+    drop_missing: also drop columns that `cols` no longer has. Only for tables rebuilt from other
+    tables (Gold): a column removed from a model must leave the table, not stay behind with its old
+    values in earlier rows or as an empty column that serving copies carry on.
     """
     status, body = root.rest("GET", root.table_url(catalog, namespace, table))
     if status == 404:
@@ -45,14 +48,25 @@ def ensure_table_columns(root: Polaris, catalog: str, namespace: str, table: str
             raise ValueError(f"{namespace}.{table}.{name}: type change {existing[name]['type']} -> {typ} "
                              "needs a migration")
     updates = []
-    if any(name not in existing for name, _ in cols):
-        keep = [(f["name"], f["type"]) for f in current["fields"]]
+    wanted_names = {name for name, _ in cols}
+    dropped = drop_missing and any(name not in wanted_names for name in existing)
+    if dropped or any(name not in existing for name, _ in cols):
+        keep = [(f["name"], f["type"]) for f in current["fields"] if not drop_missing or f["name"] in wanted_names]
         added = [(n, t) for n, t in cols if n not in existing]
         schema = tables.iceberg_schema(keep + added, schema_id=max(sc["schema-id"] for sc in meta["schemas"]) + 1,
-                                       existing={f["name"]: f["id"] for f in current["fields"]})
-        updates += [{"action": "add-schema", "schema": schema,
-                     "last-column-id": max(f["id"] for f in schema["fields"])},
-                    {"action": "set-current-schema", "schema-id": -1}]
+                                       existing={f["name"]: f["id"] for f in current["fields"]},
+                                       last_column_id=meta.get("last-column-id", 0))
+        earlier = next((sc for sc in meta["schemas"] if sc["fields"] == schema["fields"]), None)
+        if earlier is not None:
+            # The table already has this schema (a column added, then dropped again): the catalog
+            # does not add it twice, so make that one current instead.
+            updates.append({"action": "set-current-schema", "schema-id": earlier["schema-id"]})
+        else:
+            # Column ids are never reused, so the table's last id never goes down, even when the
+            # highest-numbered column is the one dropped.
+            updates += [{"action": "add-schema", "schema": schema,
+                         "last-column-id": max([meta.get("last-column-id", 0)] + [f["id"] for f in schema["fields"]])},
+                        {"action": "set-current-schema", "schema-id": -1}]
     wanted = {k: v for k, v in props.items() if k != "format-version"}
     if any(meta.get("properties", {}).get(k) != v for k, v in wanted.items()):
         updates.append({"action": "set-properties", "updates": wanted})

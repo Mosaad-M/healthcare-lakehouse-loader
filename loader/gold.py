@@ -169,7 +169,8 @@ def deploy(s: Settings) -> list[Model]:
     for model in found:
         cols = [(name, iceberg_type(typ)) for name, typ, *_ in con.execute(f"DESCRIBE ({model.sql})").fetchall()]
         try:
-            ensure_table_columns(root, model.catalog, NAMESPACE, model.name, cols, properties(model), partition=None)
+            ensure_table_columns(root, model.catalog, NAMESPACE, model.name, cols, properties(model), partition=None,
+                                 drop_missing=True)
         except PolarisError as err:
             raise GoldFailed(f"deploy of {model.qualified} failed (HTTP {err.status})") from None
     return found

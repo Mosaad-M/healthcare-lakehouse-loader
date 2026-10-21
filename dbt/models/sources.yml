@@ -13,6 +13,8 @@ sources:
         config: {meta: {partner: npi_registry}}
       - name: lab_results__results
         config: {meta: {partner: metro_lab}}
+      - name: acme_lab_mail__results
+        config: {meta: {partner: acme}}
   - name: bronze
     database: phi
     schema: bronze
