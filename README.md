@@ -258,6 +258,11 @@ Every benchmark step runs in a container capped like the loader's task (2 vCPU, 
 | 300,000 known members in one batch | 127 s (0.42 ms each) | 137 s |
 | Silver append, 1M-row batches as Silver grows to 10M rows | 25 s per batch, flat | 12 s per batch, flat |
 
+The table was measured on DuckDB 1.5.6. Back to back on the same machine, DuckDB 2.0.0 loads 10M
+rows in 128 s at 6.5 GB (1.5.6: 161 s, 6.9 GB) and 3M rows in 34 s (51 s), mostly from a faster
+Silver merge. Locally a 10M-row batch also needs the Docker VM to have about 7 GB free beside the
+stack; when it does not, the VM kills the step before its 8 GB cap.
+
 What the numbers say:
 
 - **Batch size is bound by memory.** 10M rows load in 8 GB; 30M do not. Contracts quarantine files
