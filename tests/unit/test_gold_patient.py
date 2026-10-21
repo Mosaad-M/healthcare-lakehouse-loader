@@ -138,6 +138,7 @@ def test_versions_match_the_reference_model_for_any_changes_over_any_runs(steps)
             assert versions(con) == expected(batches, landed)
             rows = con.execute("SELECT patient_sk, patient_id, version, valid_from FROM phi.gold.dim_patient").fetchall()
             assert len({r[0] for r in rows}) == len(rows), "two versions share a key"
+            assert set(meaning) <= {r[0] for r in rows}, "a key written by an earlier run is gone"
             for key, *version in rows:
                 assert meaning.setdefault(key, version) == version, "a key now names another version"
 
