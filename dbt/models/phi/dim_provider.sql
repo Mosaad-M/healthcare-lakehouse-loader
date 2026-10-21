@@ -9,8 +9,8 @@
 -- only the Bronze batches after its watermark (the last batch that changed anything), and writes
 -- only the versions that start or end (materialization iceberg_upsert). A batch is never needed again
 -- once applied, and a key never changes once written. The result equals a build over every batch at
--- once. Batches must reach Bronze in landing order, which the ingest pipeline guarantees (each pass
--- takes batches in landing order and stops at the first failure).
+-- once. A run applies batches only up to its horizon (the earliest batch still on its way to
+-- Bronze), so a slow batch is never passed; one that lands behind the history fails the run loudly.
 -- An empty table, or one written before first_seen_at existed, is built from every batch in Bronze.
 -- A file with no rows leaves no batch in Bronze, so it ends no versions.
 {{ config(materialized='iceberg_upsert', unique_key='provider_sk') }}
@@ -48,12 +48,18 @@ watermark as (
 
 -- Scalar subqueries, not a join: DuckDB turns the lower bound on _ingested_at (Bronze's partition
 -- source) into a file filter, so a run reads only the files at or after the watermark.
+-- Batches at or after the horizon wait for a later run: one may still be on its way to Bronze
+-- (loader/gold.py history_horizons), and passing it would mean never applying it.
+{%- set horizon = var('history_horizon', {}).get('provider_directory') %}
 new_rows as (
     select b.* from {{ source('bronze', 'provider_directory__providers') }} b
     where b._ingested_at >= coalesce((select mark_at from watermark), timestamptz '1900-01-01 00:00:00+00')
         and ((select mark_at from watermark) is null
             or b._ingested_at > (select mark_at from watermark)
             or b._batch_id > (select mark_batch_id from watermark))
+        {%- if horizon %}
+        and b._ingested_at < timestamptz '{{ horizon }}'
+        {%- endif %}
 ),
 
 ordered as (

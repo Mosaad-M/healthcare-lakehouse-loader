@@ -106,3 +106,29 @@ def test_replay_from_raw_rebuilds_the_same_state(s, clinic, ids):
     before = silver_rows(s, clinic, ids)
     pipeline.replay(s, clinic)
     assert silver_rows(s, clinic, ids) == before
+
+
+def test_dim_patient_agrees_with_silver_and_keeps_each_version(s, clinic, ids):
+    """Gold's patient dimension, built from the same changes in Bronze: its current versions are
+    exactly Silver's rows, the plan change made a second version, the delete ended the patient's
+    version, and the balance-only updates (an untracked column) made none."""
+    from flows.gold import refresh
+
+    refresh(serve=False)
+    con = duck.connect(s, "phi", principal="gold", alias="phi")
+    id_list = ", ".join(map(str, ids))
+    silver = {r[0]: r[1:] for r in duck.connect(s, tables.CATALOG, principal=clinic.principal).execute(
+        f"SELECT patient_id, birth_year, zip3, plan_code, cdc_seq FROM {tables.qualified(clinic, tables.SILVER)} "
+        f"WHERE patient_id IN ({id_list})").fetchall()}
+    current = {r[0]: r[1:] for r in con.execute(
+        f"SELECT patient_id, birth_year, zip3, plan_code, last_cdc_seq FROM phi.gold.dim_patient "
+        f"WHERE is_current AND patient_id IN ({id_list})").fetchall()}
+    assert current == silver
+    versions = lambda pid: con.execute(  # noqa: E731
+        "SELECT plan_code, version, is_current, ended_by_delete FROM phi.gold.dim_patient "
+        "WHERE patient_id = ? ORDER BY version", [pid]).fetchall()
+    assert versions(ids[2]) == [("GOLD", 1, False, False), ("SILVER", 2, True, None)]
+    assert versions(ids[3]) == [("GOLD", 1, False, True)]
+    assert versions(ids[1]) == [("GOLD", 1, True, None)]
+    columns = {r[0] for r in con.execute("DESCRIBE phi.gold.dim_patient").fetchall()}
+    assert not columns & {"mrn", "full_name", "email", "balance"}

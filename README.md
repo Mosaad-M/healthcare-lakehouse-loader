@@ -147,6 +147,16 @@ Existing key-encryption keys move under their partner's master key with `loader.
     `iceberg_upsert`). A key never changes once written, and an applied batch is not needed again,
     so Bronze retention can remove it. The table holds the only copy of that history after that:
     emptying it rebuilds from whatever Bronze still holds.
+  - `dim_patient` is the clinic's patients (the CDC source) as SCD type 2, kept the same way: a
+    version per change to birth year, 3-digit ZIP or plan; a delete ends the patient's version.
+    Changes are taken by Silver's rule (the latest per batch; one no newer than the patient's
+    current row is ignored), so its current versions always match Silver. Versions start when the
+    change landed: the clinic's `updated_at` is kept but not used, since its application sets it.
+    It holds no identifier columns and no balance.
+  - Both dimensions apply a source's batches only up to a horizon: the earliest batch still on its
+    way to Bronze, or five minutes ago (`LOADER_GOLD_SETTLE_SECONDS`). A slow batch is never passed
+    by a later one; a batch found in flight behind the history already applied fails the Gold run
+    (`LateBatch`) instead of being skipped.
   - `deid.gold.claims_monthly`, `provider_activity`, `lab_monthly`: de-identified aggregates;
     groups of fewer than 11 people are suppressed. The claim marts are built on the core, so
     provider activity shows each provider's specialty and state as of the service date.

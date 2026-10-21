@@ -1,4 +1,5 @@
 import itertools
+import os
 import uuid
 
 import pytest
@@ -7,6 +8,9 @@ from loader import duck, settings
 from loader.polaris import Polaris
 
 _counter = itertools.count()
+# Tests load a batch and run Gold at once: no settling time for the incremental dimensions'
+# horizon (loader/gold.py history_horizons; tests/unit/test_gold_history.py sets its own).
+os.environ.setdefault("LOADER_GOLD_SETTLE_SECONDS", "0")
 
 
 @pytest.fixture(scope="session")

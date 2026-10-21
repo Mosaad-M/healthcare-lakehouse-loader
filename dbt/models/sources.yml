@@ -21,3 +21,5 @@ sources:
     tables:
       - name: provider_directory__providers
         config: {meta: {partner: npi_registry}}
+      - name: acme_clinic_patients__patients
+        config: {meta: {partner: acme}}
