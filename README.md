@@ -287,19 +287,20 @@ CloudTrail data events and fixed infrastructure come on top.
 
 ## DuckDB
 
-The loader runs DuckDB 1.5.6. `bench/duckdb_compat.py` checks each behaviour below against the
-local stack, so a new version can be judged by running it.
+The loader runs DuckDB 2.0.0. `bench/duckdb_compat.py` checks each behaviour below against the
+local stack, so a new version can be judged by running it. The loader kept its defences when 2.0
+fixed their cause: they also cover the same failures from other causes.
 
-| Behaviour in 1.5.6 | Fixed in 2.0 | How the loader handles it |
-|---|---|---|
-| A commit answered after its HTTP timeout is resent; the resend gets 409, and DuckDB deletes the files of the commit the catalog applied | yes | A 10-minute catalog timeout; writers heal their table at once; integrity checks in maintenance |
-| A failed metadata read aborts the process instead of raising | yes | Retries; higher storage file limits; no core dumps |
-| A table whose `main` reference was removed is still read at its last snapshot | yes | Repair rolls back instead of emptying |
-| Deleting every row still reads every data file | no | Repair by rollback; operator recreate |
-| `MERGE` on Iceberg allows one update or delete action | no | `cdc` semantics as a DELETE then an INSERT, in one transaction |
-| The HTTP log records bearer tokens | no | Logging stays off (tested) |
-| Spill files are unencrypted and go to the working directory | no | Encrypted spill in a private directory |
-| HTTP connections are not reused | yes | Connection caching on |
+| Behaviour | 1.5.6 | 2.0.0 | How the loader handles it |
+|---|---|---|---|
+| A commit answered after its HTTP timeout is resent; the resend gets 409, and DuckDB deletes the files of the commit the catalog applied | yes | fixed | A 10-minute catalog timeout; writers heal their table at once; integrity checks in maintenance |
+| A failed metadata read aborts the process instead of raising | yes | fixed | Retries; higher storage file limits; no core dumps |
+| A table whose `main` reference was removed is still read at its last snapshot | yes | fixed | Repair rolls back instead of emptying |
+| Deleting every row still reads every data file | yes | yes | Repair by rollback; operator recreate |
+| `MERGE` on Iceberg allows one update or delete action | yes | fixed | `cdc` semantics as a DELETE then an INSERT, in one transaction |
+| The HTTP log records bearer tokens | yes | fixed | Logging stays off (tested) |
+| Spill files are unencrypted and go to the working directory | yes | yes | Encrypted spill in a private directory |
+| HTTP connections are not reused | yes | fixed | Connection caching on |
 
 Anything between DuckDB and Polaris must not give up on a commit before DuckDB does: a load
 balancer in front of Polaris needs an idle timeout above `LOADER_HTTP_TIMEOUT` (600 s).
@@ -335,9 +336,6 @@ that fails if the control breaks), the cryptography, and the accepted risks. In 
 
 ## Roadmap
 
-- **DuckDB 2.0** (planned for October 2026): it fixes the cause of the lost-file failure and the
-  abort on failed metadata reads. Run `bench/duckdb_compat.py`, rebuild the toolbox image, and run
-  `make verify` and the benchmarks.
 - **Google Cloud and Azure.** The storage, key and secret providers are behind one settings layer
   (`loader/settings.py`); Polaris already vends credentials for GCS and Azure storage.
 - **Load only what changed in full-state files** (eligibility-style). A per-source fingerprint finds
