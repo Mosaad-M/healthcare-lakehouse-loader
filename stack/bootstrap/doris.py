@@ -31,11 +31,18 @@ def root_connection(timeout: float = 1200):
             time.sleep(10)
 
 
+def available(row: dict) -> bool:
+    return str(row["Alive"]).lower() == "true" and float(row["AvailCapacity"].split()[0]) > 0
+
+
 def wait_for_backend(con, timeout: float = 900) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        rows = doris.query(con, "SHOW BACKENDS")
-        if rows and all(str(r[9]).lower() == "true" for r in rows):  # column 9: Alive
+        with con.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute("SHOW BACKENDS")
+            rows = cur.fetchall()
+        # Alive comes before the first disk report; creating a table in between fails ("enough backend").
+        if rows and all(available(r) for r in rows):
             return
         time.sleep(3)
     raise TimeoutError("Doris backend did not become alive")
