@@ -31,21 +31,21 @@ def root_connection(timeout: float = 1200):
             time.sleep(10)
 
 
-def available(row: dict) -> bool:
-    return str(row["Alive"]).lower() == "true" and float(row["AvailCapacity"].split()[0]) > 0
-
-
 def wait_for_backend(con, timeout: float = 900) -> None:
+    """Until Doris can place a table. It reports the backend alive, then its disks, a while before it
+    places tablets there; a CREATE TABLE before that fails ("Failed to find enough backend")."""
     deadline = time.time() + timeout
-    while time.time() < deadline:
-        with con.cursor(pymysql.cursors.DictCursor) as cur:
-            cur.execute("SHOW BACKENDS")
-            rows = cur.fetchall()
-        # Alive comes before the first disk report; creating a table in between fails ("enough backend").
-        if rows and all(available(r) for r in rows):
-            return
-        time.sleep(3)
-    raise TimeoutError("Doris backend did not become alive")
+    doris.query(con, "CREATE DATABASE IF NOT EXISTS doris_init")
+    while True:
+        try:
+            doris.query(con, "CREATE TABLE IF NOT EXISTS doris_init.probe (k INT) DUPLICATE KEY(k) "
+                             "DISTRIBUTED BY HASH(k) BUCKETS 1 PROPERTIES ('replication_num' = '1')")
+            break
+        except pymysql.err.OperationalError as err:
+            if "enough backend" not in str(err) or time.time() > deadline:
+                raise
+            time.sleep(3)
+    doris.query(con, "DROP DATABASE doris_init FORCE")
 
 
 def main() -> None:
