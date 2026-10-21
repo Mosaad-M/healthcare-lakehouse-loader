@@ -15,7 +15,7 @@ import pytest
 
 from flows.gold import refresh
 from flows.ingest import ingest
-from loader import contracts, crypto, doris, duck, journal, raw, synthetic
+from loader import contracts, crypto, doris, duck, journal, raw, synthetic, tables
 from loader.identity import Identity
 from loader.serving import REFRESHES
 from loader.shred import shred
@@ -88,10 +88,15 @@ def test_a_gold_update_is_visible_in_doris_after_the_pipeline_refresh(s, loaded,
         return item["gold_snapshot"]["S"]
 
     before, snapshot = doris.query(doris.connect(), "SELECT sum(claims) FROM serving.claims_monthly")[0][0], served_snapshot()
-    # A service date of its own (claims use window semantics, and the example tables are shared
-    # across runs, so a date another run used would be restated rather than added).
-    day = date(2025, 1, 1) + timedelta(days=int(run_id[:6], 16) % 365)
-    drop(s, loaded["acme_claims"], f"late_{run_id}.csv",
+    # A service date no run has used (claims use window semantics, and the example tables are shared
+    # across runs, so a used date would be restated rather than added; picking one from the run ID
+    # collided once the stack had seen a dozen runs).
+    claims = loaded["acme_claims"]
+    used = {r[0] for r in duck.connect(s, tables.CATALOG, principal=claims.principal).execute(
+        f"SELECT DISTINCT service_date FROM {tables.qualified(claims, tables.SILVER)} "
+        "WHERE service_date < DATE '2026-01-01'").fetchall()}
+    day = next(d for d in (date(2025, 1, 1) + timedelta(days=n) for n in range(365)) if d not in used)
+    drop(s, claims, f"late_{run_id}.csv",
          synthetic.claims_csv(canaries, day, days=1, per_day=60, seed=7, members=60))
     ingest(source="acme_claims")
     assert doris.query(doris.connect(), "SELECT sum(claims) FROM serving.claims_monthly")[0][0] == before
