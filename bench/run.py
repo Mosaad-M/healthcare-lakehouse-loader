@@ -1,7 +1,7 @@
 """Run a benchmark scenario on the host: every step is its own container (the `bench` service,
 capped like the ECS task), so a step that runs out of memory or time ends the sweep, not the run.
 
-    python3 bench/run.py rows | new_subjects | known_subjects | silver_growth | small_files [--max N]
+    python3 bench/run.py rows | new_subjects | known_subjects | silver_growth | silver_cdc | small_files [--max N]
 
 Results: bench/results/<scenario>.jsonl, one line per step (measurements, or how it broke).
 """
@@ -167,6 +167,22 @@ def scenario_silver_append_random(top: int):
         yield {"batch": b + 1, "rows": 1_000_000, "silver_rows_after": (b + 1) * 1_000_000}, run_step
 
 
+def scenario_silver_cdc(top: int):
+    """cdc semantics: Silver loaded with 3M rows, then batches of 1M changes spread over every key
+    (every third key; 1 in 20 a delete): the cost of applying a change batch to a whole table."""
+    fresh("silver_cdc")
+    for b in range(3):
+        def load(b=b):
+            generate("silver_cdc", 1_000_000, 1000, offset=b * 1_000_000, cdc_op="I", cdc_seq=1 + b * 1_000_000)
+            return ingest("silver_cdc", f"insert batch {b + 1}, Silver {b + 1} M rows")
+        yield {"step": f"insert {b + 1}", "rows": 1_000_000}, load
+    for c in range(max(1, top // 1_000_000)):
+        def change(c=c):
+            generate("silver_cdc", 1_000_000, 1000, stride=3, cdc_op="U", cdc_seq=(10 + c) * 10_000_000)
+            return ingest("silver_cdc", f"change batch {c + 1} on 3 M rows")
+        yield {"step": f"change {c + 1}", "rows": 1_000_000}, change
+
+
 def scenario_soak(top: int):
     """As small_files, with table maintenance every 50 batches: does it keep commits bounded?"""
     fresh("soak")
@@ -194,6 +210,7 @@ SCENARIOS = {"rows": (scenario_rows, 100_000_000), "new_subjects": (scenario_new
              "known_subjects": (scenario_known_subjects, 1_000_000),
              "silver_growth": (scenario_silver_growth, 100_000_000), "silver_append": (scenario_silver_append, 100_000_000),
              "silver_append_random": (scenario_silver_append_random, 100_000_000),
+             "silver_cdc": (scenario_silver_cdc, 3_000_000),
              "small_files": (scenario_small_files, 2000), "soak": (scenario_soak, 500)}
 
 def main(argv: list[str] | None = None) -> None:

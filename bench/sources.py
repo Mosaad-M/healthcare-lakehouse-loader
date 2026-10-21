@@ -14,12 +14,17 @@ from loader.vault import KEY_VAULT
 EXAMPLE = "acme_claims"
 # Scenarios that need another Silver semantics than the claims contract's window.
 VARIANTS = {"silver_append": {"silver": {"semantics": "append"}},
-            "silver_append_random": {"silver": {"semantics": "append"}}}
+            "silver_append_random": {"silver": {"semantics": "append"}},
+            "silver_cdc": {"silver": {"semantics": "cdc", "op_column": "cdc_op", "order_column": "cdc_seq"}}}
+# A change feed's columns (as contracts/acme_clinic_patients.yaml), for the cdc variant.
+CDC_COLUMNS = [{"name": "cdc_op", "type": "string", "phi": "none"}, {"name": "cdc_seq", "type": "long", "phi": "none"}]
 
 
 def contract(name: str, **changes) -> contracts.Contract:
     data = yaml.safe_load((Path("contracts") / f"{EXAMPLE}.yaml").read_text())
     data.update(source=f"bench_{name}", **VARIANTS.get(name, {}), **changes)
+    if data["silver"]["semantics"] == "cdc":
+        data["columns"] = data["columns"] + CDC_COLUMNS
     return contracts.Contract.model_validate(data)
 
 
