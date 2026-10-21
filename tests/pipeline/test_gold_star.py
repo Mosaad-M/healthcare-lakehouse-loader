@@ -123,3 +123,30 @@ def test_a_run_with_nothing_new_leaves_the_dimension_as_it_was(s, loaded):
     before = con.execute(q).fetchall()
     refresh(serve=False)
     assert gold(s).execute(q).fetchall() == before
+
+
+def test_a_run_reads_only_the_bronze_files_after_its_watermark(s, loaded):
+    """With nothing new, the dimension must not fetch every directory file in Bronze: its cutoff on
+    _ingested_at has to reach the scan as a filter (a join to the watermark did not, and each run
+    read all of Bronze). Counted from DuckDB's HTTP log on a throwaway connection: the log holds
+    request headers (loader connections keep it off), so only file paths are read from it here."""
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from loader import gold as gold_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        gold_mod.write_profile(s, Path(tmp))
+        sql = {m.name: m.sql for m in gold_mod.models(s, Path(tmp))}["dim_provider"]
+    con = gold(s)
+    files = con.execute("""SELECT count(*) FROM iceberg_metadata('phi.bronze.provider_directory__providers')
+        WHERE manifest_content = 'DATA' AND status <> 'DELETED'""").fetchone()[0]
+    if files < 2:
+        pytest.skip("Bronze holds a single data file: nothing to skip")
+    con.execute("CALL enable_logging('HTTP')")
+    assert con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0] == 0  # nothing new to write
+    fetched = {path for (message,) in con.execute("SELECT message FROM duckdb_logs WHERE type = 'HTTP'").fetchall()
+               for path in re.findall(r"/bronze/provider_directory__providers/data/[^\s\"'?]+\.parquet", message)}
+    con.close()
+    assert 0 < len(fetched) < files, f"fetched {len(fetched)} of {files} Bronze data files"

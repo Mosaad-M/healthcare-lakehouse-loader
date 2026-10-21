@@ -46,11 +46,14 @@ watermark as (
     limit 1
 ),
 
+-- Scalar subqueries, not a join: DuckDB turns the lower bound on _ingested_at (Bronze's partition
+-- source) into a file filter, so a run reads only the files at or after the watermark.
 new_rows as (
     select b.* from {{ source('bronze', 'provider_directory__providers') }} b
-    left join watermark w on true
-    where w.mark_at is null or b._ingested_at > w.mark_at
-        or (b._ingested_at = w.mark_at and b._batch_id > w.mark_batch_id)
+    where b._ingested_at >= coalesce((select mark_at from watermark), timestamptz '1900-01-01 00:00:00+00')
+        and ((select mark_at from watermark) is null
+            or b._ingested_at > (select mark_at from watermark)
+            or b._batch_id > (select mark_batch_id from watermark))
 ),
 
 ordered as (
