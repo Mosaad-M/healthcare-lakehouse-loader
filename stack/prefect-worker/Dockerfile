@@ -3,4 +3,4 @@
 FROM prefecthq/prefect:3.8.8-python3.12
 # Security fixes released since the base image was built (trivy).
 RUN apt-get update && apt-get -y upgrade && rm -rf /var/lib/apt/lists/*
-RUN pip install --no-cache-dir prefect-docker==0.7.4
+RUN pip install --no-cache-dir prefect-docker==0.7.4 certifi==2026.10.19
