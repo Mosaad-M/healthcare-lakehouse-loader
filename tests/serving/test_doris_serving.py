@@ -140,6 +140,12 @@ def test_analysts_see_only_de_identified_copies(loaded):
     assert refused(con, "SELECT * FROM lake_deid.gold.claims_monthly LIMIT 1")
 
 
+def test_the_lab_copy_holds_no_single_patients_value(loaded):
+    """min and max of a cell are each one patient's result: the analysts' copy must not have them."""
+    columns = [r[0] for r in doris.query(user("analyst"), "DESCRIBE serving.lab_monthly")]
+    assert "min_value" not in columns and "max_value" not in columns and "sum_value" in columns
+
+
 def test_row_policy_limits_analyst_ma_to_massachusetts(loaded):
     everyone = doris.query(user("analyst"), "SELECT state, count(*) FROM serving.provider_activity GROUP BY state")
     ma_only = doris.query(user("analyst_ma"), "SELECT state, count(*) FROM serving.provider_activity GROUP BY state")

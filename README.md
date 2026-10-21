@@ -138,8 +138,10 @@ Existing key-encryption keys move under their partner's master key with `loader.
   - A dimensional core in `phi.gold`, not served: `dim_provider`, the provider directory as SCD
     type 2 (a version per change; `valid_from` is when the change landed, and a provider's first
     version is backdated so older claims find it), and `fact_claim`, one row per claim with the
-    key of the provider version valid on its service date. Every row carries its `partner`; facts
-    hold no identifier columns, only `subject_id`.
+    key of the provider version valid on its service date. `fact_lab_result` holds every lab
+    source's results (metro_lab's `lab_results`, acme's mailed results), each with its value in
+    the test's standard unit where the unit is one we can convert (`dbt/macros/lab_units.sql`).
+    Every row carries its `partner`; facts hold no identifier columns, only `subject_id`.
   - `dim_provider` keeps its own history: each run reads only the directory batches in Bronze after
     the last one it applied, and writes only the versions that start or end (materialization
     `iceberg_upsert`). A key never changes once written, and an applied batch is not needed again,
@@ -148,6 +150,12 @@ Existing key-encryption keys move under their partner's master key with `loader.
   - `deid.gold.claims_monthly`, `provider_activity`, `lab_monthly`: de-identified aggregates;
     groups of fewer than 11 people are suppressed. The claim marts are built on the core, so
     provider activity shows each provider's specialty and state as of the service date.
+    `lab_monthly` is built on `fact_lab_result` and has no minimum or maximum (each is one
+    patient's result); `sum_value` lets months be combined by weighting. A subject is per source,
+    so one person in two labs counts twice in `patients`: a lab group is kept only if a single
+    source alone has 11 patients in it.
+  - A column removed from a Gold model is dropped from its table at deploy (Bronze and Silver
+    only ever gain columns), so a serving copy cannot keep it.
   - `phi.gold.member_claims`: one row per member for care teams; the member name stays encrypted.
 - **Serving** copies Gold into Doris tables in the same flow that rebuilds Gold, and records which
   Gold snapshot each copy holds. Encrypted columns stay encrypted.

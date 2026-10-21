@@ -6,6 +6,8 @@ models:
     description: Provider directory entries, SCD type 2 (one row per version), rebuilt from Bronze.
   - name: fact_claim
     description: One row per claim (current version), with the provider version valid on its service date.
+  - name: fact_lab_result
+    description: One row per lab result from every lab source, with the value in the test's standard unit.
   - name: claims_monthly
     config: {meta: {serve: true, key: service_month}}
   - name: provider_activity

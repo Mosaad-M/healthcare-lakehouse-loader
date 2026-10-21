@@ -131,7 +131,10 @@ def test_the_gold_models_built_from_a_source_are_found():
     found = {d["model"] for d in offboarding.gold_dependents(["acme_claims"])}
     assert found == {"phi.gold.fact_claim", "deid.gold.claims_monthly", "deid.gold.provider_activity",
                      "phi.gold.member_claims"}
-    assert {d["model"] for d in offboarding.gold_dependents(["lab_results"])} == {"deid.gold.lab_monthly"}
+    assert {d["model"] for d in offboarding.gold_dependents(["lab_results"])} == {"phi.gold.fact_lab_result",
+                                                                                 "deid.gold.lab_monthly"}
+    assert {d["model"] for d in offboarding.gold_dependents(["acme_lab_mail"])} == {"phi.gold.fact_lab_result",
+                                                                                   "deid.gold.lab_monthly"}
 
 
 def test_gold_models_built_through_other_models_or_from_bronze_are_found():
