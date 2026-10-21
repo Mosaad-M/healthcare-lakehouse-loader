@@ -31,9 +31,13 @@ def root_connection(timeout: float = 1200):
             time.sleep(10)
 
 
+NOT_READY = ("enough backend", "available backend num is 0")
+
+
 def wait_for_backend(con, timeout: float = 900) -> None:
     """Until Doris can place a table. It reports the backend alive, then its disks, a while before it
-    places tablets there; a CREATE TABLE before that fails ("Failed to find enough backend")."""
+    places tablets there; a CREATE TABLE before that fails: "Failed to find enough backend" on a fresh
+    install, "available backend num is 0" after a restart."""
     deadline = time.time() + timeout
     doris.query(con, "CREATE DATABASE IF NOT EXISTS doris_init")
     while True:
@@ -42,7 +46,7 @@ def wait_for_backend(con, timeout: float = 900) -> None:
                              "DISTRIBUTED BY HASH(k) BUCKETS 1 PROPERTIES ('replication_num' = '1')")
             break
         except pymysql.err.OperationalError as err:
-            if "enough backend" not in str(err) or time.time() > deadline:
+            if not any(m in str(err) for m in NOT_READY) or time.time() > deadline:
                 raise
             time.sleep(3)
     doris.query(con, "DROP DATABASE doris_init FORCE")

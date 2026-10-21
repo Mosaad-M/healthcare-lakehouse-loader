@@ -47,7 +47,8 @@ def bench(*args: str, timeout: int = STEP_TIMEOUT) -> dict | None:
     start = time.time()
     code, stdout, stderr = STEP(list(args), timeout)
     if code == 137:
-        raise Broke("out of memory (killed at the 8 GB cap)")
+        # Locally the Docker VM running out of memory kills it the same way (check its dmesg: global_oom).
+        raise Broke("out of memory (killed: the 8 GB cap, or locally the Docker VM)")
     if code != 0:
         tail = [line for line in stderr.splitlines() if line.strip()][-3:]
         raise Broke(f"exit {code}: {' | '.join(tail)[:400]}")

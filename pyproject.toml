@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "duckdb==1.5.6",
+    "duckdb==2.0.0",
     "boto3>=1.40",
     "prefect==3.8.8",
     "pyspark-client==4.1.3",

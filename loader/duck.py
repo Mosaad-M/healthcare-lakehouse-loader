@@ -118,8 +118,11 @@ def is_conflict(err: BaseException) -> bool:
 def is_lost_credentials(err: BaseException) -> bool:
     """DuckDB 1.5.6 sometimes reads a table's newer metadata without its vended credentials when
     writers contend (seen with threads and with processes, on first attempts and retries). The
-    request then hits the fail-closed secret. Safe to retry on a fresh connection."""
-    return UNSCOPED_HOST in str(err)
+    request then hits the fail-closed secret. Safe to retry on a fresh connection. The fail-closed
+    endpoint's name marks it (an unresolvable name on AWS); locally DuckDB 2.0 reports the s3:// path
+    instead, and storage refusing the fallback's invalid key marks it."""
+    text = str(err)
+    return UNSCOPED_HOST in text or "InvalidAccessKeyId" in text
 
 
 def is_unreachable(err: BaseException) -> bool:
@@ -139,8 +142,9 @@ def run_txn(connect: Callable[[], duckdb.DuckDBPyConnection], statements: list[s
     """Run statements in one transaction, retrying the whole transaction on commit conflicts, lost
     vended credentials and refused storage connections.
 
-    DuckDB does not retry a 409 itself. Every attempt uses a new connection from `connect`:
-    retrying on the same connection can reuse stale table state and lose the vended credentials.
+    DuckDB 2.0 rebases a commit onto racing appends itself; any other 409 it raises. Every attempt
+    uses a new connection from `connect`: retrying on the same connection can reuse stale table
+    state and lose the vended credentials.
     Returns the number of attempts used; non-conflict errors are raised immediately.
 
     `heal` (the caller holds the table's lock) checks the table and repairs it. It returns True if

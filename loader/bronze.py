@@ -46,8 +46,9 @@ def encrypt_identifiers(con: duckdb.DuckDBPyConnection, s: Settings, contract: C
     # Read the batch as Arrow (columnar, compact) and encrypt it a chunk at a time, so Python holds
     # per-value objects for one chunk only: whole-batch Python rows took about 1.8 KB per row and
     # ran a 10M-row batch out of an 8 GB task (benchmark).
-    table = con.execute(f"SELECT _row_number, {as_text}, {', '.join(f'CAST({c} AS VARCHAR)' for c in idents)} "
-                        "FROM typed").fetch_arrow_table()
+    # con.sql, not con.execute: Arrow from an execute() result costs an extra copy of every row.
+    table = con.sql(f"SELECT _row_number, {as_text}, {', '.join(f'CAST({c} AS VARCHAR)' for c in idents)} "
+                    "FROM typed").to_arrow_table()
     sids = sorted(set(subjects.values()))
     position = {sid: i for i, sid in enumerate(sids)}
     ciphers = [crypto.SubjectCipher(keys[sid], sid) for sid in sids]
