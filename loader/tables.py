@@ -43,10 +43,13 @@ def properties(contract: Contract, layer: str) -> dict[str, str]:
     return props
 
 
-def iceberg_schema(cols: list[tuple[str, str]], schema_id: int = 0, existing: dict | None = None) -> dict:
-    """Iceberg schema JSON. Existing field ids are kept; new columns get the next free ids."""
+def iceberg_schema(cols: list[tuple[str, str]], schema_id: int = 0, existing: dict | None = None,
+                   last_column_id: int = 0) -> dict:
+    """Iceberg schema JSON. Existing field ids are kept; new columns get ids above both the existing
+    ones and the table's last-column-id: Iceberg matches data files to columns by id, so the id of a
+    dropped column must never be given to a new one (its old values would read as the new column's)."""
     existing = existing or {}
-    next_id = max(existing.values(), default=0) + 1
+    next_id = max([last_column_id, *existing.values()], default=0) + 1
     fields = []
     for name, typ in cols:
         if name in existing:

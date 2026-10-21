@@ -54,12 +54,19 @@ def ensure_table_columns(root: Polaris, catalog: str, namespace: str, table: str
         keep = [(f["name"], f["type"]) for f in current["fields"] if not drop_missing or f["name"] in wanted_names]
         added = [(n, t) for n, t in cols if n not in existing]
         schema = tables.iceberg_schema(keep + added, schema_id=max(sc["schema-id"] for sc in meta["schemas"]) + 1,
-                                       existing={f["name"]: f["id"] for f in current["fields"]})
-        # Column ids are never reused, so the table's last id never goes down, even when the
-        # highest-numbered column is the one dropped.
-        updates += [{"action": "add-schema", "schema": schema,
-                     "last-column-id": max([meta.get("last-column-id", 0)] + [f["id"] for f in schema["fields"]])},
-                    {"action": "set-current-schema", "schema-id": -1}]
+                                       existing={f["name"]: f["id"] for f in current["fields"]},
+                                       last_column_id=meta.get("last-column-id", 0))
+        earlier = next((sc for sc in meta["schemas"] if sc["fields"] == schema["fields"]), None)
+        if earlier is not None:
+            # The table already has this schema (a column added, then dropped again): the catalog
+            # does not add it twice, so make that one current instead.
+            updates.append({"action": "set-current-schema", "schema-id": earlier["schema-id"]})
+        else:
+            # Column ids are never reused, so the table's last id never goes down, even when the
+            # highest-numbered column is the one dropped.
+            updates += [{"action": "add-schema", "schema": schema,
+                         "last-column-id": max([meta.get("last-column-id", 0)] + [f["id"] for f in schema["fields"]])},
+                        {"action": "set-current-schema", "schema-id": -1}]
     wanted = {k: v for k, v in props.items() if k != "format-version"}
     if any(meta.get("properties", {}).get(k) != v for k, v in wanted.items()):
         updates.append({"action": "set-properties", "updates": wanted})
