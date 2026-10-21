@@ -3,7 +3,11 @@ version: 2
 # dim_provider and fact_claim are the person-level core the marts are built from; they are not served.
 models:
   - name: dim_provider
-    description: Provider directory entries, SCD type 2 (one row per version), rebuilt from Bronze.
+    description: Provider directory entries, SCD type 2 (one row per version), kept incrementally from Bronze.
+    config: {meta: {history_source: provider_directory}}  # loader/gold.py: history_horizons
+  - name: dim_patient
+    description: Clinic patients, SCD type 2 (one row per version), kept incrementally from the CDC feed in Bronze.
+    config: {meta: {history_source: acme_clinic_patients}}
   - name: fact_claim
     description: One row per claim (current version), with the provider version valid on its service date.
   - name: fact_lab_result

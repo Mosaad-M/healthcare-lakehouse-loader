@@ -93,14 +93,15 @@ def _dbt(args: list[str], profiles: Path):
     return result.result
 
 
-def models(s: Settings, profiles: Path, deploying: bool = False) -> list[Model]:
+def models(s: Settings, profiles: Path, deploying: bool = False, vars: dict | None = None) -> list[Model]:
     """Every model, compiled, in dependency order: a model comes after the models it reads, so deploy
     can create each table before describing a model that reads it. `deploying` compiles with the
-    `gold_deploy` var: a model that reads its own table (dim_provider) then reads an empty, typed
-    stand-in, since the table may not exist yet."""
+    `gold_deploy` var: a model that reads its own table (the incremental dimensions) then reads an
+    empty, typed stand-in, since the table may not exist yet. `vars` are other dbt vars."""
     import json
 
-    _dbt(["compile", *(["--vars", "{gold_deploy: true}"] if deploying else [])], profiles)
+    given = {**(vars or {}), **({"gold_deploy": True} if deploying else {})}
+    _dbt(["compile", *(["--vars", json.dumps(given)] if given else [])], profiles)
     nodes = json.loads((profiles / "target" / "manifest.json").read_text())["nodes"]
     found = {n["unique_id"]: n for n in nodes.values() if n["resource_type"] == "model"}
     ordered, done = [], set()
@@ -176,9 +177,65 @@ def deploy(s: Settings) -> list[Model]:
     return found
 
 
+# A batch is visible to Gold only once it is in the manifest, a moment after its landing time is
+# taken: a dimension's history never goes nearer to now than this, so a batch landing at that moment
+# cannot be passed by a later one. LOADER_GOLD_SETTLE_SECONDS changes it (the tests set 0).
+SETTLE_SECONDS = 300
+
+
+class LateBatch(GoldFailed):
+    """A batch of a history source reached the pipeline behind the history Gold already applied."""
+
+
+def _when(value):
+    """A landing time (manifest string or datetime) as an aware UTC datetime."""
+    from datetime import datetime, timezone
+
+    moment = value if isinstance(value, datetime) else datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return moment.astimezone(timezone.utc)
+
+
+def history_horizons(s: Settings, found: list[Model], now=None) -> dict[str, str]:
+    """For each incremental dimension's source (meta.history_source): the landing time its run may
+    not reach. That is the earliest batch still on its way to Bronze (landed, not yet loaded or
+    quarantined), or now less SETTLE_SECONDS. A dimension applies batches in landing order and
+    never again reads one before its watermark, so a batch still in flight must not be passed by a
+    later one: it would never be applied.
+
+    Fails loudly (LateBatch) if a batch in flight already landed at or before the history the
+    dimension has applied (a clock behind another worker's, say): it can no longer be applied in order.
+    """
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from loader.state import LANDED, Manifest
+
+    now = now or datetime.now(timezone.utc)
+    settle = float(os.environ.get("LOADER_GOLD_SETTLE_SECONDS", SETTLE_SECONDS))
+    horizons, con = {}, None
+    for model in found:
+        source = model.meta.get("history_source")
+        if not source:
+            continue
+        pending = [b for b in Manifest(s).for_source(source) if b.state == LANDED]
+        if pending:
+            con = con or duck.connect(s, model.catalog, principal=PRINCIPAL, alias=model.catalog)
+            applied = con.execute(f"""SELECT greatest(max(first_seen_at), max(valid_to))
+                FROM {model.qualified} WHERE first_seen_at IS NOT NULL""").fetchone()[0]
+            behind = [b for b in pending if applied is not None and _when(b.landed_at) <= _when(applied)]
+            if behind:
+                raise LateBatch(f"{model.qualified}: {len(behind)} batch(es) of {source} landed at or before the "
+                                "history already applied and are not in Bronze yet; they would be skipped. Load "
+                                "them, then rebuild the dimension (empty its table) if they change its history.")
+        # Parsed and re-printed, so only a timestamp reaches the model's SQL.
+        horizons[source] = min([_when(b.landed_at) for b in pending] + [now - timedelta(seconds=settle)]).isoformat()
+    return horizons
+
+
 def run(s: Settings) -> list[Model]:
     """Rebuild every Gold table, holding each table's writer lock (maintenance and Gold
     never write the same table at once). Returns the models in run order."""
+    import json
     from contextlib import ExitStack
 
     from loader.state import table_lock
@@ -189,5 +246,6 @@ def run(s: Settings) -> list[Model]:
         with ExitStack() as locks:
             for model in sorted(found, key=lambda m: m.qualified):  # one order: no lock cycles
                 locks.enter_context(table_lock(s, model.qualified))
-            _dbt(["run"], Path(tmp))
+            horizons = history_horizons(s, found)
+            _dbt(["run", "--vars", json.dumps({"history_horizon": horizons})], Path(tmp))
     return found
