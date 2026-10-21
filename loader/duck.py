@@ -33,6 +33,15 @@ def spill_directory() -> str:
     return path
 
 
+def strict_settings() -> dict[str, str]:
+    """DuckDB 2.1 rejects an unquoted name passed to a table function as a string
+    (`read_csv(people.csv)`); 2.0 only warns. Rejected here already, so a slip fails in CI rather than
+    on the upgrade. DuckDB 1.x (bench/duckdb_compat.py still runs it) has no such setting."""
+    if int(duckdb.__version__.split(".")[0]) < 2:
+        return {}
+    return {"table_function_identifier_conversion": "DISABLE_IMPLICIT_STRING"}
+
+
 def load_extensions(con: duckdb.DuckDBPyConnection, s: Settings) -> None:
     if s.duckdb_extension_dir:
         # Extensions are baked into the image; never download code at run time.
@@ -42,6 +51,8 @@ def load_extensions(con: duckdb.DuckDBPyConnection, s: Settings) -> None:
     else:
         con.execute("INSTALL httpfs; INSTALL aws; INSTALL iceberg; INSTALL avro")
     con.execute("LOAD httpfs; LOAD aws; LOAD iceberg; LOAD avro")
+    for name, value in strict_settings().items():
+        con.execute(f"SET {name} = {sql_str(value)}")
     # Large batches spill to disk, and staging holds plaintext (raw rows before encryption). Spill
     # files are encrypted with a key that lives only in this process, in a private directory, never
     # DuckDB's default `.tmp` under the working directory (locally that is the mounted repository).

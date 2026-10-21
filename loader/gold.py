@@ -51,7 +51,8 @@ def ensure_access(root: Polaris, s: Settings) -> None:
 def extension_options(s: Settings) -> dict:
     """Load DuckDB extensions only from the directory baked into the image (never download code)."""
     return {"autoinstall_known_extensions": False, "autoload_known_extensions": False,
-            **({"extension_directory": s.duckdb_extension_dir} if s.duckdb_extension_dir else {})}
+            **({"extension_directory": s.duckdb_extension_dir} if s.duckdb_extension_dir else {}),
+            **duck.strict_settings()}
 
 
 def write_profile(s: Settings, directory: Path) -> None:

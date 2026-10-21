@@ -36,8 +36,8 @@ def statements(contract: Contract, batch: Batch) -> list[str]:
                 f"AND (SELECT max({w}) FROM {src}) OR ({key_tuple}) IN (SELECT {key_tuple} FROM {src})", insert]
     if semantics == "cdc":
         # The latest change per key in this batch replaces Silver's row only if it is newer, so
-        # replays and redelivered events are harmless. DuckDB's Iceberg MERGE allows one
-        # update/delete action, so this is a DELETE then an INSERT in one transaction.
+        # replays and redelivered events are harmless. A DELETE then an INSERT in one transaction
+        # (DuckDB 1.x's Iceberg MERGE allowed one update/delete action).
         # Both compare log positions, so neither depends on seeing the other's effect.
         op, order = contract.silver.op_column, contract.silver.order_column
         keys = contract.primary_key
