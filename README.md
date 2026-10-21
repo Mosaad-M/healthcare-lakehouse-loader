@@ -45,6 +45,9 @@ make down     # stop (keeps data); `make clean` also deletes volumes
 runs one suite. Local secrets (master key, identity pepper, passwords) are generated into `.env` on
 the first `make up`.
 
+One folder owns the local stack, because the Compose project name is fixed. The stack targets refuse
+to run from a git worktree, or while the stack is running from another checkout (`make down` there first).
+
 ## How a file gets loaded
 
 Each source has a contract in `contracts/`: the partner it comes from, file format, columns with
