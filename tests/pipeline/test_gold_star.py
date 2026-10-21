@@ -87,6 +87,7 @@ def test_a_directory_change_adds_a_version_and_earlier_claims_keep_theirs(s, loa
         ON d.provider_sk = f.provider_sk ORDER BY d.npi LIMIT 1""").fetchone()[0]
     claim_keys = "SELECT DISTINCT provider_sk FROM phi.gold.fact_claim WHERE provider_npi = ? ORDER BY 1"
     before = con.execute(claim_keys, [npi]).fetchall()
+    all_keys = {r[0] for r in con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()}
     current = con.execute("SELECT provider_sk FROM phi.gold.dim_provider WHERE npi = ? AND is_current", [npi]).fetchone()[0]
     changed = f"Changed {run_id}"
     raw.RawZone(s).drop(found["provider_directory"], f"providers_star2_{run_id}.csv",
@@ -101,5 +102,51 @@ def test_a_directory_change_adds_a_version_and_earlier_claims_keep_theirs(s, loa
                        [current]).fetchone() == (new_from, False)
     # The claims' service dates are before the change landed: they keep the versions they had.
     assert con.execute(claim_keys, [npi]).fetchall() == before
+    # The run wrote only what changed: every key from before is still there.
+    assert all_keys <= {r[0] for r in con.execute("SELECT provider_sk FROM phi.gold.dim_provider").fetchall()}
     assert new_sk not in {r[0] for r in before}
     assert changed not in {r[0] for r in con.execute("SELECT specialty FROM deid.gold.provider_activity").fetchall()}
+
+
+def test_every_version_carries_its_watermark_columns(s, loaded):
+    """first_seen_at (and ended_by_batch_id on ended versions) are what the next run starts from; a
+    table deployed before they existed is rebuilt on its first run."""
+    con = gold(s)
+    assert con.execute("""SELECT count(*) FROM phi.gold.dim_provider
+        WHERE first_seen_at IS NULL OR source_batch_id IS NULL
+           OR (valid_to IS NOT NULL AND ended_by_batch_id IS NULL)""").fetchone()[0] == 0
+
+
+def test_a_run_with_nothing_new_leaves_the_dimension_as_it_was(s, loaded):
+    con = gold(s)
+    q = "SELECT * FROM phi.gold.dim_provider ORDER BY provider_sk"
+    before = con.execute(q).fetchall()
+    refresh(serve=False)
+    assert gold(s).execute(q).fetchall() == before
+
+
+def test_a_run_reads_only_the_bronze_files_after_its_watermark(s, loaded):
+    """With nothing new, the dimension must not fetch every directory file in Bronze: its cutoff on
+    _ingested_at has to reach the scan as a filter (a join to the watermark did not, and each run
+    read all of Bronze). Counted from DuckDB's HTTP log on a throwaway connection: the log holds
+    request headers (loader connections keep it off), so only file paths are read from it here."""
+    import re
+    import tempfile
+    from pathlib import Path
+
+    from loader import gold as gold_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        gold_mod.write_profile(s, Path(tmp))
+        sql = {m.name: m.sql for m in gold_mod.models(s, Path(tmp))}["dim_provider"]
+    con = gold(s)
+    files = con.execute("""SELECT count(*) FROM iceberg_metadata('phi.bronze.provider_directory__providers')
+        WHERE manifest_content = 'DATA' AND status <> 'DELETED'""").fetchone()[0]
+    if files < 2:
+        pytest.skip("Bronze holds a single data file: nothing to skip")
+    con.execute("CALL enable_logging('HTTP')")
+    assert con.execute(f"SELECT count(*) FROM ({sql})").fetchone()[0] == 0  # nothing new to write
+    fetched = {path for (message,) in con.execute("SELECT message FROM duckdb_logs WHERE type = 'HTTP'").fetchall()
+               for path in re.findall(r"/bronze/provider_directory__providers/data/[^\s\"'?]+\.parquet", message)}
+    con.close()
+    assert 0 < len(fetched) < files, f"fetched {len(fetched)} of {files} Bronze data files"

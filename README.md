@@ -130,13 +130,18 @@ Existing key-encryption keys move under their partner's master key with `loader.
 ## Gold and serving
 
 - **Gold** is a dbt project (`dbt/`) on DuckDB that reads Silver (and Bronze, where it needs
-  history) and writes only Gold. dbt replaces each table's contents in one transaction, models
-  after the models they read.
+  history) and writes only Gold, models after the models they read, each table in one
+  transaction. Most tables are replaced whole on every run; `dim_provider` is incremental.
   - A dimensional core in `phi.gold`, not served: `dim_provider`, the provider directory as SCD
-    type 2 (a version per change, rebuilt from the directory snapshots in Bronze; `valid_from` is
-    when the change landed, and a provider's first version is backdated so older claims find it),
-    and `fact_claim`, one row per claim with the key of the provider version valid on its service
-    date. Every row carries its `partner`; facts hold no identifier columns, only `subject_id`.
+    type 2 (a version per change; `valid_from` is when the change landed, and a provider's first
+    version is backdated so older claims find it), and `fact_claim`, one row per claim with the
+    key of the provider version valid on its service date. Every row carries its `partner`; facts
+    hold no identifier columns, only `subject_id`.
+  - `dim_provider` keeps its own history: each run reads only the directory batches in Bronze after
+    the last one it applied, and writes only the versions that start or end (materialization
+    `iceberg_upsert`). A key never changes once written, and an applied batch is not needed again,
+    so Bronze retention can remove it. The table holds the only copy of that history after that:
+    emptying it rebuilds from whatever Bronze still holds.
   - `deid.gold.claims_monthly`, `provider_activity`, `lab_monthly`: de-identified aggregates;
     groups of fewer than 11 people are suppressed. The claim marts are built on the core, so
     provider activity shows each provider's specialty and state as of the service date.
