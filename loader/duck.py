@@ -142,8 +142,9 @@ def run_txn(connect: Callable[[], duckdb.DuckDBPyConnection], statements: list[s
     """Run statements in one transaction, retrying the whole transaction on commit conflicts, lost
     vended credentials and refused storage connections.
 
-    DuckDB does not retry a 409 itself. Every attempt uses a new connection from `connect`:
-    retrying on the same connection can reuse stale table state and lose the vended credentials.
+    DuckDB 2.0 rebases a commit onto racing appends itself; any other 409 it raises. Every attempt
+    uses a new connection from `connect`: retrying on the same connection can reuse stale table
+    state and lose the vended credentials.
     Returns the number of attempts used; non-conflict errors are raised immediately.
 
     `heal` (the caller holds the table's lock) checks the table and repairs it. It returns True if
