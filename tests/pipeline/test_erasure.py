@@ -40,7 +40,7 @@ def world(s, run_id, contracts_dir, canaries):
 
 def silver_snapshot(s, contract) -> int:
     con = duck.connect(s, tables.CATALOG, principal=contract.principal)
-    return con.execute(f"SELECT snapshot_id FROM iceberg_snapshots({tables.qualified(contract, tables.SILVER)}) "
+    return con.execute(f"SELECT snapshot_id FROM iceberg_snapshots('{tables.qualified(contract, tables.SILVER)}') "
                        "ORDER BY timestamp_ms DESC LIMIT 1").fetchone()[0]
 
 

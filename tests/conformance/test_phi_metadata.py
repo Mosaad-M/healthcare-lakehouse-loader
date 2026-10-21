@@ -20,7 +20,7 @@ def manifest_bounds(s, con, qualified: str) -> dict[int, dict[str, bytes | None]
     location = body["metadata"]["location"]
     con.execute(s.duckdb_s3_secret("audit_manifests", location, vended_s3(body)))
     paths = [r[0] for r in con.execute(
-        f"SELECT DISTINCT manifest_path FROM iceberg_metadata({qualified}) WHERE manifest_content = 'DATA'").fetchall()]
+        f"SELECT DISTINCT manifest_path FROM iceberg_metadata('{qualified}') WHERE manifest_content = 'DATA'").fetchall()]
     bounds: dict[int, dict[str, bytes | None]] = {}
     for path in paths:
         for lower, upper in con.execute(
