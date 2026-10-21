@@ -20,12 +20,14 @@ from tests.unit.test_gold_star import compiled
 EPOCH = datetime(1900, 1, 1, tzinfo=timezone.utc)
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
 SETTINGS = settings(max_examples=200, deadline=None, suppress_health_check=[HealthCheck.too_slow])
-# One change: (patient, op, (birth_year, zip3, plan_code), stale). A stale change reuses an older
-# sequence number: a redelivery or a change that arrives after a newer one.
+# One change: (patient, op, (birth_year, zip3, plan_code), kind). kind "new" is the next change in
+# the log; ("redeliver", i) repeats one of the patient's earlier changes exactly, sequence number
+# included (at-least-once delivery); "older" carries an older sequence number than any yet (a change
+# that arrives after newer ones).
 CHANGE = st.tuples(st.sampled_from([1, 2]), st.sampled_from(["I", "U", "U", "D"]),
                    st.tuples(st.sampled_from([1970, 1980]), st.sampled_from(["021", "100"]),
                              st.sampled_from(["GOLD", "SILVER"])),
-                   st.booleans())
+                   st.one_of(st.just("new"), st.just("older"), st.tuples(st.just("redeliver"), st.integers(0, 3))))
 BATCH = st.lists(CHANGE, min_size=1, max_size=4)
 
 
@@ -116,21 +118,28 @@ def expected(batches: list[list[tuple]], landed: list[datetime]) -> list[tuple]:
 def test_versions_match_the_reference_model_for_any_changes_over_any_runs(steps):
     sql, deploy_sql = _compiled(False), _compiled(True)
     con = lake(deploy_sql)
-    batches, landed, keys, seq = [], [], set(), 100
+    batches, landed, meaning, seq, sent = [], [], {}, 100, {}
     for i, (changes, run_now) in enumerate(steps):
         numbered = []
-        for pid, op, attrs, stale in changes:
-            seq += 1
-            numbered.append((pid, op, attrs, seq - 50 if stale else seq))  # stale: an older sequence number
+        for pid, op, attrs, kind in changes:
+            earlier = sent.get(pid, [])
+            if isinstance(kind, tuple) and earlier:
+                change = earlier[-1 - kind[1] % len(earlier)]  # an exact redelivery
+            else:
+                seq += 1
+                change = (pid, op, attrs, seq - 50 if kind == "older" else seq)
+                sent.setdefault(pid, []).append(change)
+            numbered.append(change)
         batches.append(numbered)
         landed.append(T0 + timedelta(days=i + 1))
         land(con, f"b{i}", landed[-1], numbered)
         if run_now or i == len(steps) - 1:
             run(con, sql)
             assert versions(con) == expected(batches, landed)
-            now = {r[0] for r in con.execute("SELECT patient_sk FROM phi.gold.dim_patient").fetchall()}
-            assert keys <= now, "a key written by an earlier run changed"
-            keys = now
+            rows = con.execute("SELECT patient_sk, patient_id, version, valid_from FROM phi.gold.dim_patient").fetchall()
+            assert len({r[0] for r in rows}) == len(rows), "two versions share a key"
+            for key, *version in rows:
+                assert meaning.setdefault(key, version) == version, "a key now names another version"
 
 
 def test_an_update_a_delete_and_a_re_insert(sql, deploy_sql):
@@ -167,3 +176,22 @@ def test_run_and_deploy_sql_return_the_same_columns(sql, deploy_sql):
     con = lake(deploy_sql)
     columns = lambda q: sorted(r[:2] for r in con.execute(f"DESCRIBE ({q})").fetchall())  # noqa: E731
     assert columns(sql["dim_patient"]) == columns(deploy_sql["dim_patient"])
+
+
+@pytest.mark.parametrize("runs", ["one run", "a run per batch"])
+def test_an_insert_redelivered_after_a_delete_starts_a_version_of_its_own(sql, deploy_sql, runs):
+    """Insert (seq 1), delete (seq 2), then the insert again, exactly (seq 1): Silver takes it back (a
+    delete leaves nothing to compare with), so the patient has a second version. It must not take
+    the first version's key: keys come from the batch that starts a version, not the sequence."""
+    con = lake(deploy_sql)
+    insert = (1, "I", (1970, "021", "GOLD"), 1)
+    for i, changes in enumerate([[insert], [(1, "D", (1970, "021", "GOLD"), 2)], [insert]]):
+        land(con, f"b{i}", T0 + timedelta(days=i + 1), changes)
+        if runs == "a run per batch":
+            run(con, sql)
+    if runs == "one run":
+        run(con, sql)
+    rows = con.execute("SELECT patient_sk, version, is_current, ended_by_delete FROM phi.gold.dim_patient "
+                       "ORDER BY version").fetchall()
+    assert [r[1:] for r in rows] == [(1, False, True), (2, True, None)]
+    assert len({r[0] for r in rows}) == 2

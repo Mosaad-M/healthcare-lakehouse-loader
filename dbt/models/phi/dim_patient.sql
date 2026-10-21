@@ -178,7 +178,10 @@ started as (
 )
 
 select
-    md5(concat(cast(patient_id as varchar), '|', cast(start_cdc_seq as varchar))) as patient_sk,
+    -- Keyed by the batch that started the version: at most one version of a patient starts in a batch
+    -- (only its latest change there counts). Not by the change's sequence number: a redelivered insert
+    -- after a delete starts a new version with the same sequence number as the first.
+    md5(concat(cast(patient_id as varchar), '|', source_batch_id)) as patient_sk,
     patient_id,
     subject_id,
     birth_year,
