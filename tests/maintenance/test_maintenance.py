@@ -2,7 +2,7 @@
 orphans left by retried commits, never touches referenced files, keeps PHI out of metadata,
 and leaves the data reading identically in DuckDB and Doris."""
 import json
-import threading
+import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -48,29 +48,15 @@ def detach_policies(s, layer: str, table: str, names: list[str]) -> None:
         root.rest("DELETE", f"{base}/{name}?detach-all=true")
 
 
-def race(s, contract, writers: int = 4) -> list[str]:
-    """Commits released together without retries: every loser leaves files behind (orphans)."""
-    table = tables.qualified(contract, tables.BRONZE)
-    cons = [duck.connect(s, tables.CATALOG, principal=contract.principal) for _ in range(writers)]
-    for i, con in enumerate(cons):
-        con.execute("BEGIN")
-        con.execute(f"INSERT INTO {table} (claim_id, _batch_id) SELECT 'race' || x, 'race{i}' FROM range(20) r(x)")
-    out, barrier = [], threading.Barrier(writers)
+def plant_orphan(s, contract) -> None:
+    """A file under the Bronze table's data/ that no snapshot references: what a commit that lost
+    a race leaves (DuckDB 1.x; 2.0 rebases racing appends, so a race no longer leaves one)."""
+    from loader.polaris import vended_s3
 
-    def commit(con):
-        barrier.wait()
-        try:
-            con.execute("COMMIT")
-            out.append("ok")
-        except Exception as err:  # noqa: BLE001
-            out.append("conflict" if duck.is_conflict(err) else duck.redact(err))
-
-    threads = [threading.Thread(target=commit, args=(c,)) for c in cons]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    return out
+    body = Polaris(s, contract.principal).load_table(tables.CATALOG, tables.BRONZE, contract.table, vended=True)
+    bucket, prefix = body["metadata"]["location"].removeprefix("s3://").split("/", 1)
+    s.s3(vended_s3(body)).put_object(Bucket=bucket, Key=f"{prefix}/data/orphan-{uuid.uuid4().hex}.parquet",
+                                     Body=b"orphan")
 
 
 def aged(listing):
@@ -105,17 +91,16 @@ def churned(s, run_id, contracts_dir, canaries):
         drop(s, contract, f"claims_{i:02d}.csv", synthetic.claims_csv(
             canaries, date(2026, 9, 1) + timedelta(days=i % 5), days=3, per_day=12, seed=i, members=9))
         ingest(source=contract.source, contracts_dir=str(contracts_dir))
-    outcomes = race(s, contract)
+    plant_orphan(s, contract)
     attached = {layer: attach_strict_policies(s, run_id, layer, contract.table) for layer in (tables.BRONZE, tables.SILVER)}
-    yield contract, outcomes
+    yield contract
     for layer, names in attached.items():
         detach_policies(s, layer, contract.table, names)
     remove_source(s, contract)
 
 
 def test_maintenance_brings_churned_tables_within_policy(s, churned):
-    contract, outcomes = churned
-    assert outcomes.count("conflict") >= 1, f"the race left no orphans to remove: {outcomes}"
+    contract = churned
     executor = maintenance.executor(s)
     snapshot = {layer: plain_rows(s, contract, layer, "_batch_id, claim_id" + (", _row_number" if layer == "bronze" else ""))
                 for layer in (tables.BRONZE, tables.SILVER)}
@@ -144,7 +129,7 @@ def test_maintenance_brings_churned_tables_within_policy(s, churned):
 def test_compaction_keeps_phi_out_of_metadata(s, churned):
     """Files rewritten by Spark still have no bounds for PHI columns (service_date is PHI);
     non-PHI columns keep theirs (positive control)."""
-    contract, _ = churned
+    contract = churned
     meta = Polaris(s).load_table(tables.CATALOG, tables.SILVER, contract.table)["metadata"]
     ids = {f["name"]: f["id"] for f in meta["schemas"][-1]["fields"]}
     con = duck.connect(s, tables.CATALOG, principal=contract.principal)
@@ -155,7 +140,7 @@ def test_compaction_keeps_phi_out_of_metadata(s, churned):
 
 
 def test_a_locked_table_is_skipped(s, churned):
-    contract, _ = churned
+    contract = churned
     name = f"{tables.CATALOG}.{tables.SILVER}.{contract.table}"
     with table_lock(s, name):
         run = maintenance.maintain_table(s, maintenance.executor(s), tables.CATALOG, tables.SILVER, contract.table)
@@ -163,7 +148,7 @@ def test_a_locked_table_is_skipped(s, churned):
 
 
 def test_an_orphan_window_under_a_day_is_refused(s, churned, run_id):
-    contract, _ = churned
+    contract = churned
     root = Polaris(s)
     base = root.policy_url(tables.CATALOG, "/namespaces/ops/policies")
     name = f"t{run_id}_unsafe_orphans"

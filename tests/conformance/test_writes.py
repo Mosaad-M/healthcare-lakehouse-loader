@@ -22,25 +22,22 @@ def test_single_table_txn_is_atomic(s, con, table):
 
 
 def test_multi_table_txn_is_atomic(s, table):
-    """Polaris commits a two-table transaction atomically: a conflict on one table rolls back both."""
+    """Polaris commits a two-table transaction atomically: when one table's commit fails, neither
+    lands. The failure is a dropped table, which no client can rebase onto (DuckDB 2.0 rebases a
+    commit onto a racing append, so an append no longer makes it fail)."""
     _, a = table
     b = f"{a}_b"
     setup = duck.connect(s, "phi")
     setup.execute(f"CREATE TABLE {a} (id INT)")
     setup.execute(f"CREATE TABLE {b} (id INT)")
     writer = duck.connect(s, "phi", multi_table_commit=True)
-    rival = duck.connect(s, "phi")
     writer.execute("BEGIN")
     writer.execute(f"INSERT INTO {a} VALUES (1)")
     writer.execute(f"INSERT INTO {b} VALUES (1)")
-    rival.execute(f"INSERT INTO {b} VALUES (2)")
-    with pytest.raises(duckdb.Error) as exc:
+    duck.connect(s, "phi").execute(f"DROP TABLE {b}")
+    with pytest.raises(duckdb.Error):
         writer.execute("COMMIT")
-    assert duck.is_conflict(exc.value), duck.redact(exc.value)
-    check = duck.connect(s, "phi")
-    in_a = check.execute(f"SELECT count(*) FROM {a} WHERE id = 1").fetchone()[0]
-    in_b = check.execute(f"SELECT count(*) FROM {b} WHERE id = 1").fetchone()[0]
-    assert (in_a, in_b) == (0, 0), f"partial commit: a={in_a}, b={in_b}"
+    assert duck.connect(s, "phi").execute(f"SELECT count(*) FROM {a}").fetchone()[0] == 0, "partial commit"
 
 
 def test_concurrent_appenders_with_retry(s, table):
@@ -100,9 +97,9 @@ def test_racing_commits_never_lose_data(s, table, trial):
     assert landed == accepted, f"accepted commits missing from the table: {sorted(accepted - landed)}"
 
 
-def test_sorted_table_blocks_duckdb_writes(s, con, polaris, ns, table):
-    """Tables never declare a sort order because DuckDB cannot write to them. If this starts
-    failing, DuckDB gained the feature and the rule can be revisited."""
+def test_duckdb_writes_to_a_sorted_table_only_from_2_0(s, con, polaris, ns, table):
+    """Tables never declare a sort order because DuckDB 1.x cannot write to them. DuckDB 2.0 can,
+    so the rule (and sort-order compaction) can be revisited."""
     name, t = table
     con.execute(f"CREATE TABLE {t} (id INT, ts TIMESTAMP)")
     meta = polaris.load_table("phi", ns, name)["metadata"]
@@ -112,8 +109,13 @@ def test_sorted_table_blocks_duckdb_writes(s, con, polaris, ns, table):
             {"transform": "identity", "source-id": ts_id, "direction": "desc", "null-order": "nulls-last"}]}},
         {"action": "set-default-sort-order", "sort-order-id": -1},
     ])
-    with pytest.raises(duckdb.Error, match="sorted iceberg table"):
-        duck.connect(s, "phi").execute(f"INSERT INTO {t} VALUES (1, now()::TIMESTAMP)")
+    insert = f"INSERT INTO {t} VALUES (1, now()::TIMESTAMP)"
+    if duckdb.__version__.startswith("1."):
+        with pytest.raises(duckdb.Error, match="sorted iceberg table"):
+            duck.connect(s, "phi").execute(insert)
+    else:
+        duck.connect(s, "phi").execute(insert)
+        assert duck.connect(s, "phi").execute(f"SELECT count(*) FROM {t}").fetchone()[0] == 1
 
 
 def _files_read(con, sql: str) -> int:
