@@ -167,6 +167,17 @@ Existing key-encryption keys move under their partner's master key with `loader.
   - A column removed from a Gold model is dropped from its table at deploy (Bronze and Silver
     only ever gain columns), so a serving copy cannot keep it.
   - `phi.gold.member_claims`: one row per member for care teams; the member name stays encrypted.
+- **Semantic layer.** Metrics are defined once in dbt (`dbt/models/schema.yml`, dbt's v2 YAML: a
+  model's semantic model and metrics sit on the model): claims, billed, paid, distinct members and
+  paid per claim on `fact_claim`, with `dim_provider`'s attributes as dimensions through the
+  provider version key, so they are as of each claim's service date. `loader/semantic.py` has
+  MetricFlow write the SQL (names only; unknown names are refused, and no free-text filters are
+  taken) and runs it on Gold with DuckDB as the `metrics` principal, which reads exactly the
+  semantic tables and the time spine (`deid.gold.metricflow_time_spine`).
+  **Results are not suppressed**: they come from person-level Gold, so they are PHI, for roles
+  granted person-level data only; de-identified users keep the suppressed marts. MetricFlow does
+  not run on Doris. Distinct members are per source (no cross-source person in Gold yet), and the
+  partner-delete report lists the metrics built on each affected model.
 - **Serving** copies Gold into Doris tables in the same flow that rebuilds Gold, and records which
   Gold snapshot each copy holds. Encrypted columns stay encrypted.
 - **The Gold flow skips a run** when nothing it reads has changed since the last one (the compiled

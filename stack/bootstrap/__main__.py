@@ -226,6 +226,10 @@ def main() -> None:
     from loader import gold
 
     log(f"gold tables ready: {', '.join(m.qualified for m in gold.deploy(s))}")
+    from loader import semantic
+
+    semantic.ensure_access(root, s)
+    log(f"metrics principal ready: reads {', '.join('.'.join(t) for t in sorted(semantic.tables()))}")
     from flows.deploy import deploy_gold, deploy_maintenance, deploy_sources
 
     log(f"{len(deploy_sources())} ingest deployments registered with Prefect")

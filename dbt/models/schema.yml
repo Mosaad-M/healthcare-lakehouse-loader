@@ -1,15 +1,81 @@
 version: 2
 # meta.serve: copy into Doris. meta.key: the Doris key and distribution column.
 # dim_provider and fact_claim are the person-level core the marts are built from; they are not served.
+#
+# Semantic layer (dbt's v2 YAML: a model's semantic model and metrics sit on the model). Metrics are
+# computed from person-level Gold and are NOT suppressed: their results are PHI, for roles granted
+# person-level data only (loader/semantic.py). De-identified users keep the suppressed marts.
 models:
   - name: dim_provider
     description: Provider directory entries, SCD type 2 (one row per version), kept incrementally from Bronze.
     config: {meta: {history_source: provider_directory}}  # loader/gold.py: history_horizons
+    semantic_model: true
+    columns:
+      - name: provider_sk
+        description: One version of a provider's directory entry; fact_claim holds the one valid on its service date.
+        entity: {type: primary, name: provider_version}
+      - name: npi
+        dimension: categorical
+      - name: specialty
+        dimension: categorical
+      - name: state
+        dimension: categorical
+      - name: active
+        dimension: categorical
   - name: dim_patient
     description: Clinic patients, SCD type 2 (one row per version), kept incrementally from the CDC feed in Bronze.
     config: {meta: {history_source: acme_clinic_patients}}
   - name: fact_claim
     description: One row per claim (current version), with the provider version valid on its service date.
+    semantic_model: true
+    agg_time_dimension: service_date
+    columns:
+      - name: claim_id
+        entity: {type: primary, name: claim}
+      - name: provider_sk
+        entity: {type: foreign, name: provider_version}
+      - name: subject_id
+        description: The member as a subject of the claims source (per source; no cross-source person yet).
+        entity: {type: foreign, name: member}
+      - name: service_date
+        granularity: day
+        dimension: {type: time}
+      - name: diagnosis_code
+        dimension: categorical
+      - name: procedure_code
+        dimension: categorical
+      - name: partner
+        dimension: categorical
+    metrics:
+      - name: claims
+        # A sum of ones, not agg: count: this MetricFlow expects count to have been rewritten to a
+        # sum during parsing, which dbt's v2 YAML does not do. claim_id is the key: never null.
+        description: Number of claims.
+        type: simple
+        agg: sum
+        expr: '1'
+      - name: billed
+        description: Billed amount.
+        type: simple
+        agg: sum
+        expr: billed_amount
+      - name: paid
+        description: Paid amount.
+        type: simple
+        agg: sum
+        expr: paid_amount
+      - name: distinct_members
+        description: >
+          Distinct members with a claim, at any grouping (counted from claims, so never added up across
+          groups). Members of the claims source only: there is no cross-source person in Gold yet.
+        type: simple
+        agg: count_distinct
+        expr: subject_id
+      - name: paid_per_claim
+        description: Paid amount per claim.
+        type: ratio
+        numerator: paid
+        denominator: claims
   - name: fact_lab_result
     description: One row per lab result from every lab source, with the value in the test's standard unit.
   - name: claims_monthly
@@ -20,3 +86,9 @@ models:
     config: {meta: {serve: true, key: test_code}}
   - name: member_claims
     config: {meta: {serve: true, key: subject_id}}
+  - name: metricflow_time_spine
+    description: One row per day, for the semantic layer's time handling. Holds no data from any source.
+    time_spine: {standard_granularity_column: date_day}
+    columns:
+      - name: date_day
+        granularity: day

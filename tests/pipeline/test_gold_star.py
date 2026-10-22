@@ -195,3 +195,24 @@ def test_rewritten_gold_tables_keep_a_day_of_snapshots_and_dimensions_a_week(s, 
 
     assert expiry("phi", "fact_claim") == 24 and expiry("deid", "claims_monthly") == 24
     assert expiry("phi", "dim_provider") == 168  # history: incremental writes, kept as the default
+
+
+def test_metric_queries_run_as_the_metrics_principal_and_match_gold(s, loaded):
+    """The semantic layer on the stack: MetricFlow's SQL, run as `metrics`, equals a direct query on
+    Gold; and `metrics` reads the semantic tables only, not Silver, Bronze or the marts."""
+    from loader import semantic
+
+    columns, rows = semantic.query(s, ["claims", "paid", "distinct_members"], ["provider_version__state"])
+    got = {r[columns.index("provider_version__state")]: (r[columns.index("claims")], r[columns.index("paid")],
+                                                         r[columns.index("distinct_members")]) for r in rows}
+    expected = {r[0]: tuple(r[1:]) for r in gold(s).execute("""SELECT d.state, count(*), sum(f.paid_amount),
+        count(DISTINCT f.subject_id) FROM phi.gold.fact_claim f
+        LEFT JOIN phi.gold.dim_provider d ON d.provider_sk = f.provider_sk GROUP BY 1""").fetchall()}
+    assert got == expected and got
+    con = duck.connect(s, "phi", principal=semantic.PRINCIPAL, alias="phi")
+    duck.attach_polaris(con, s, "deid", principal=semantic.PRINCIPAL, alias="deid")
+    assert con.execute("SELECT count(*) FROM phi.gold.fact_claim").fetchone()[0] > 0
+    for table in ("phi.silver.acme_claims__claims", "phi.bronze.provider_directory__providers",
+                  "phi.gold.member_claims", "deid.gold.claims_monthly"):
+        with pytest.raises(Exception, match="(?i)forbidden|not authorized|denied|403|does not exist"):
+            con.execute(f"SELECT count(*) FROM {table}").fetchone()
