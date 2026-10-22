@@ -57,6 +57,7 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 | Threat | Control | Status |
 |---|---|---|
 | E: a source principal touches another source's tables | Per-source principals granted their own two tables only (`tests/access`; on real S3, `test_vended_credentials_reach_one_table_on_real_s3`) | tested |
+| E: Gold reads PHI it does not use | The gold principal reads only the tables dbt lists as Gold's sources, granted table by table at deploy; other tables are refused, and grants a source no longer needs are revoked (`test_gold_principal.py`) | tested |
 | E: direct S3 access to the lake | Bucket policies deny everyone but the catalog's vending roles, the restore role and break-glass, whatever IAM grants (`tests/aws/test_guardrail.py`) | tested on AWS |
 | E: the restore role used to read or change the lake | It may only list versions, read earlier versions and copy an object back within its bucket; the bucket policy enforces the same; uploads, deletes and cross-bucket copies refused (`test_the_restore_identity_can_only_copy_versions_back`); every request in CloudTrail | tested |
 | I: a load reads another source's or partner's raw files | Loads reach the raw zone only with short-lived credentials whose session policy admits their own source's prefixes (and mailbox or staging prefix); on AWS the flow role has no raw access of its own, only the right to assume the raw-access role (`test_a_load_reaches_only_its_own_source`) | tested |
