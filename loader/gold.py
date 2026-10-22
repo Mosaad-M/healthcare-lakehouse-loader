@@ -39,13 +39,33 @@ class Model:
         return f"{self.catalog}.{NAMESPACE}.{self.name}"
 
 
+def source_tables() -> set[tuple[str, str, str]]:
+    """(catalog, namespace, table) of every dbt source: the only lake tables Gold reads."""
+    return {(n["database"], n["schema"], n["name"]) for n in manifest()["sources"].values()}
+
+
 def ensure_access(root: Polaris, s: Settings) -> None:
-    """The gold principal reads the PHI catalog (Silver) and writes only the gold namespaces."""
+    """The gold principal writes only the gold namespaces and reads only its dbt sources, table by
+    table (`gold_reader`): not the whole PHI catalog, every partner's Bronze included. A source
+    table that does not exist fails here, and grants for tables no source uses any more are
+    revoked."""
     for catalog in CATALOGS:
         expect(root.rest("POST", f"{s.polaris_uri}/v1/{catalog}/namespaces", {"namespace": [NAMESPACE]}), 200, 409)
         admin.ensure_catalog_role(root, catalog, "gold_writer", [
             {"type": "namespace", "namespace": [NAMESPACE], "privilege": p} for p in WRITE])
-    admin.ensure_principal(root, s, PRINCIPAL, {"phi": ["reader", "gold_writer"], "deid": ["gold_writer"]})
+    for catalog in CATALOGS:
+        wanted = [{"type": "catalog", "privilege": p} for p in ("NAMESPACE_LIST", "TABLE_LIST")] + [
+            {"type": "table", "namespace": [namespace], "tableName": table, "privilege": "TABLE_READ_DATA"}
+            for cat, namespace, table in sorted(source_tables()) if cat == catalog]
+        admin.ensure_catalog_role(root, catalog, "gold_reader", wanted)
+        for grant in expect(root.mgmt("GET", f"/catalogs/{catalog}/catalog-roles/gold_reader/grants"), 200)["grants"]:
+            if grant not in wanted:
+                expect(root.mgmt("POST", f"/catalogs/{catalog}/catalog-roles/gold_reader/grants", {"grant": grant}), 201)
+    admin.ensure_principal(root, s, PRINCIPAL, {c: ["gold_reader", "gold_writer"] for c in CATALOGS})
+    # Earlier deploys gave the whole-catalog reader role (Polaris answers 400 for one not held).
+    held = expect(root.mgmt("GET", f"/principal-roles/{PRINCIPAL}_role/catalog-roles/phi"), 200)["roles"]
+    if "reader" in {r["name"] for r in held}:
+        expect(root.mgmt("DELETE", f"/principal-roles/{PRINCIPAL}_role/catalog-roles/phi/reader"), 204)
 
 
 def extension_options(s: Settings) -> dict:
