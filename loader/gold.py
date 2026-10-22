@@ -98,7 +98,7 @@ def write_profile(s: Settings, directory: Path) -> None:
              "endpoint": host, "url_style": "path", "use_ssl": ssl, "region": "us-east-1"},
         ],
         "attach": [{"path": c, "alias": c, "type": "iceberg", "options": {
-            "endpoint": s.polaris_uri, "secret": "polaris_gold", "disable_multi_table_commit": True}}
+            duck.catalog_url_option(): s.polaris_uri, "secret": "polaris_gold", "disable_multi_table_commit": True}}
             for c in CATALOGS],
     }}}}
     (directory / "profiles.yml").write_text(yaml.safe_dump(profile))

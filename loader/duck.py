@@ -33,6 +33,12 @@ def spill_directory() -> str:
     return path
 
 
+def catalog_url_option() -> str:
+    """The Iceberg ATTACH option naming the catalog's URL: `uri` from DuckDB 2.0 (`endpoint` is
+    deprecated there), `endpoint` on 1.x, which has no `uri` (bench/duckdb_compat.py still runs 1.x)."""
+    return "endpoint" if int(duckdb.__version__.split(".")[0]) < 2 else "uri"
+
+
 def strict_settings() -> dict[str, str]:
     """DuckDB 2.1 rejects an unquoted name passed to a table function as a string
     (`read_csv(people.csv)`); 2.0 only warns. Rejected here already, so a slip fails in CI rather than
@@ -95,7 +101,7 @@ def attach_polaris(con: duckdb.DuckDBPyConnection, s: Settings, catalog: str, pr
         f"OAUTH2_SCOPE 'PRINCIPAL_ROLE:ALL')"
     )
     con.execute(
-        f"ATTACH {sql_str(catalog)} AS {alias} (TYPE iceberg, ENDPOINT {sql_str(s.polaris_uri)}, "
+        f"ATTACH {sql_str(catalog)} AS {alias} (TYPE iceberg, {catalog_url_option()} {sql_str(s.polaris_uri)}, "
         f"SECRET {alias}_polaris, ACCESS_DELEGATION_MODE 'vended_credentials', "
         f"DISABLE_MULTI_TABLE_COMMIT {str(not multi_table_commit).lower()})"
     )
