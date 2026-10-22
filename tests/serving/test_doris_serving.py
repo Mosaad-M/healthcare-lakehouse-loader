@@ -249,7 +249,8 @@ def test_every_care_team_query_is_recorded_and_only_root_reads_the_record(loaded
     while not rows and time.time() < deadline:
         time.sleep(5)
         rows = doris.query(doris.connect(), "SELECT user, state, return_rows, queried_tables_and_views "
-                           "FROM __internal_schema.audit_log WHERE stmt LIKE %s", (f"%{tag}%",))
+                           "FROM __internal_schema.audit_log WHERE stmt LIKE %s AND stmt NOT LIKE '%%audit_log%%'",
+                           (f"%{tag}%",))  # not this polling query, which carries the tag too
     assert rows, "the query was not recorded"
     who, state, returned, tables_read = rows[0]
     assert (who, state, returned) == ("care_team", "EOF", 3)
