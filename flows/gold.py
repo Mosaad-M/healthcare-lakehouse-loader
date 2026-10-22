@@ -29,13 +29,14 @@ def refresh(serve: bool = True) -> None:
     s = settings.load()
     try:
         models = gold.run(s)
-        if not models:
+        if models:
+            logger.info("gold rebuilt: %s", ", ".join(m.qualified for m in models))
+        else:
             logger.info("gold unchanged since the last run: nothing rebuilt or copied")
-            return
-        logger.info("gold rebuilt: %s", ", ".join(m.qualified for m in models))
         if serve and doris_running():
-            copies = serving.refresh(s, models)
-            logger.info("serving copies refreshed: %s", copies)
+            if models:
+                logger.info("serving copies refreshed: %s", serving.refresh(s, models))
+            logger.info("doris audit: %d queries copied to the journal", serving.export_audit(s))
         elif serve:
             logger.warning("Doris is not running (stack started without the doris profile): serving skipped")
     except Exception as err:  # noqa: BLE001 - every error is redacted before it leaves the flow
