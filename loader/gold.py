@@ -5,8 +5,11 @@ come from DESCRIBE of the model's compiled SQL, and the properties from the laye
 is v2; the PHI catalog keeps metrics at `counts`). run() then lets dbt replace each
 table's contents in one transaction (materialization iceberg_replace).
 """
+import hashlib
+import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +36,7 @@ class Model:
     catalog: str
     sql: str
     meta: dict
+    materialized: str = ""
 
     @property
     def qualified(self) -> str:
@@ -137,7 +141,8 @@ def models(s: Settings, profiles: Path, deploying: bool = False, vars: dict | No
             visit(parent, (*path, uid))
         done.add(uid)
         n = found[uid]
-        ordered.append(Model(n["name"], n["database"], n["compiled_code"], n["config"].get("meta", {})))
+        ordered.append(Model(n["name"], n["database"], n["compiled_code"], n["config"].get("meta", {}),
+                             n["config"].get("materialized", "")))
 
     for uid in sorted(found):
         visit(uid)
@@ -179,7 +184,7 @@ def properties(model: Model) -> dict[str, str]:
 
 def deploy(s: Settings) -> list[Model]:
     """Create missing Gold tables (and add new columns). Runs as root."""
-    from loader.deploy import ensure_table_columns
+    from loader.deploy import attach_table_policy, ensure_table_columns
 
     root = Polaris(s)
     ensure_access(root, s)
@@ -195,6 +200,9 @@ def deploy(s: Settings) -> list[Model]:
                                  drop_missing=True)
         except PolarisError as err:
             raise GoldFailed(f"deploy of {model.qualified} failed (HTTP {err.status})") from None
+        if model.materialized == "iceberg_replace":
+            # Rewritten whole on every changed run: a day of snapshots, not the 7-day default.
+            attach_table_policy(root, model.catalog, NAMESPACE, model.name, "short_snapshot_expiry")
     return found
 
 
@@ -253,20 +261,48 @@ def history_horizons(s: Settings, found: list[Model], now=None) -> dict[str, str
     return horizons
 
 
-def run(s: Settings) -> list[Model]:
+RUNS = "gold_runs"  # DynamoDB: the inputs of the last completed run
+
+
+def inputs(s: Settings, found: list[Model]) -> tuple[str, float]:
+    """A fingerprint of everything a run reads (the compiled models and each source table's current
+    snapshot), and when the newest of those snapshots was committed (epoch seconds)."""
+    reader, parts, newest = Polaris(s, PRINCIPAL), [m.sql for m in found], 0.0
+    for catalog, namespace, table in sorted(source_tables()):
+        meta = reader.load_table(catalog, namespace, table)["metadata"]
+        current = meta.get("current-snapshot-id")
+        parts.append(f"{catalog}.{namespace}.{table}={current}")
+        newest = max([newest] + [snap["timestamp-ms"] / 1000 for snap in meta.get("snapshots", [])
+                                 if snap["snapshot-id"] == current])
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest(), newest
+
+
+def run(s: Settings, force: bool = False) -> list[Model]:
     """Rebuild every Gold table, holding each table's writer lock (maintenance and Gold
-    never write the same table at once). Returns the models in run order."""
+    never write the same table at once). Returns the models in run order, or [] when nothing Gold
+    reads has changed since the last run (unless `force`): the rewritten tables are not copied again.
+    A source snapshot newer than the last run's start less the settling time could hold a batch the
+    dimensions' horizon left out then, so it still runs."""
     import json
     from contextlib import ExitStack
 
     from loader.state import table_lock
 
+    started = time.time()
+    settle = float(os.environ.get("LOADER_GOLD_SETTLE_SECONDS", SETTLE_SECONDS))
     with tempfile.TemporaryDirectory() as tmp:
         write_profile(s, Path(tmp))
         found = models(s, Path(tmp))
+        fingerprint, newest = inputs(s, found)
+        last = s.dynamodb().get_item(TableName=RUNS, Key={"name": {"S": "last"}}, ConsistentRead=True).get("Item")
+        if (not force and last and last["inputs"]["S"] == fingerprint
+                and newest < float(last["started_at"]["N"]) - settle):
+            return []
         with ExitStack() as locks:
             for model in sorted(found, key=lambda m: m.qualified):  # one order: no lock cycles
                 locks.enter_context(table_lock(s, model.qualified))
             horizons = history_horizons(s, found)
             _dbt(["run", "--vars", json.dumps({"history_horizon": horizons})], Path(tmp))
+    s.dynamodb().put_item(TableName=RUNS, Item={"name": {"S": "last"}, "inputs": {"S": fingerprint},
+                                                "started_at": {"N": str(started)}})
     return found

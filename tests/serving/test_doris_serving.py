@@ -238,3 +238,22 @@ def test_the_backend_does_not_log_vended_tokens():
         value = [d[0].lower() for d in cur.description].index("value")
         values = {row[value] for row in cur.fetchall()}
     assert values == {"WARNING"}, values
+
+
+def test_every_care_team_query_is_recorded_and_only_root_reads_the_record(loaded, run_id):
+    """Doris records each query (user, time, client, statement, tables, rows) in its audit table; the
+    serving users cannot read it. It flushes in batches (up to a minute)."""
+    tag = f"audit_{run_id}_{random.randrange(10**9)}"
+    doris.query(user("care_team"), f"SELECT /* {tag} */ subject_id FROM serving.member_claims LIMIT 3")
+    deadline, rows = time.time() + 120, []
+    while not rows and time.time() < deadline:
+        time.sleep(5)
+        rows = doris.query(doris.connect(), "SELECT user, state, return_rows, queried_tables_and_views "
+                           "FROM __internal_schema.audit_log WHERE stmt LIKE %s AND stmt NOT LIKE '%%audit_log%%'",
+                           (f"%{tag}%",))  # not this polling query, which carries the tag too
+    assert rows, "the query was not recorded"
+    who, state, returned, tables_read = rows[0]
+    assert (who, state, returned) == ("care_team", "EOF", 3)
+    assert "serving.member_claims" in str(tables_read)
+    for name in ("care_team", "analyst"):
+        assert refused(user(name), "SELECT count(*) FROM __internal_schema.audit_log"), name

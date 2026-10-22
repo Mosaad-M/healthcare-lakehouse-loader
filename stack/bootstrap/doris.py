@@ -70,7 +70,7 @@ def main() -> None:
             'meta.cache.iceberg.table.ttl-second' = '0')""")
         log(f"doris catalog lake_{catalog} created")
     serving.setup(con)
-    copies = serving.refresh(s, gold.run(s))
+    copies = serving.refresh(s, gold.run(s, force=True))  # copies may be missing: always build
     serving.apply_policies(con)  # after the copies exist: a policy needs its table
     log(f"doris serving copies ready: {copies}")
     log("doris done")

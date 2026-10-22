@@ -29,6 +29,9 @@ def refresh(serve: bool = True) -> None:
     s = settings.load()
     try:
         models = gold.run(s)
+        if not models:
+            logger.info("gold unchanged since the last run: nothing rebuilt or copied")
+            return
         logger.info("gold rebuilt: %s", ", ".join(m.qualified for m in models))
         if serve and doris_running():
             copies = serving.refresh(s, models)
