@@ -205,6 +205,18 @@ def unfreeze(s: Settings, partner: str, contracts: dict[str, Contract], actor: s
 
 # ---------------------------------------------------------------- report
 
+def _metrics_on(manifest: dict, model_uid: str) -> list[str]:
+    """Semantic-layer metrics computed from a Gold model: its semantic model's metrics and every
+    metric built on them (ratios, derived metrics)."""
+    found, queue = set(), [model_uid]
+    while queue:
+        for child in manifest["child_map"].get(queue.pop(), []):
+            if child.startswith(("semantic_model.", "metric.")) and child not in found:
+                found.add(child)
+                queue.append(child)
+    return sorted(manifest["metrics"][m]["name"] for m in found if m.startswith("metric."))
+
+
 def gold_dependents(sources: list[str]) -> list[dict]:
     """Gold models built from any of the sources' tables, and their Doris copies (served models
     only): every model that reads one of their Bronze or Silver tables, directly or through other
@@ -230,7 +242,8 @@ def gold_dependents(sources: list[str]) -> list[dict]:
         catalog = node["database"]
         served = bool(node["config"].get("meta", {}).get("serve"))  # only served models have a Doris copy
         out.append({"model": f"{catalog}.gold.{node['name']}", "reads": sorted(reads[uid]),
-                    "doris_copy": f"serving.{node['name']}" if served else None, "deidentified": catalog == "deid"})
+                    "doris_copy": f"serving.{node['name']}" if served else None, "deidentified": catalog == "deid",
+                    "metrics": _metrics_on(manifest, uid)})
     return out
 
 

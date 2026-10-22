@@ -72,6 +72,7 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 | Threat | Control | Status |
 |---|---|---|
 | I: analysts see identifiers | De-identified Gold suppresses small cells; person-level Gold (`phi.gold`: the dimensional core, the member mart) is served only to roles granted it; Doris roles and row policies; copies hold ciphertext only (`tests/serving`) | tested |
+| I: metric results reach people who may not see person-level data | Metric queries (`loader/semantic.py`) run as the `metrics` principal, which reads only the semantic models' tables and the time spine; results are unsuppressed and documented as PHI; queries take metric and dimension names only, resolved by MetricFlow (`tests/unit/test_semantic.py`, `test_metric_queries_run_as_the_metrics_principal_and_match_gold`) | tested |
 | I: bulk re-identification | The decrypt service checks role, purpose and a subject cap per call, and audits every call (`test_erasure.py`) | tested |
 | R: the decrypt audit is altered | Each event is first written as its own write-once object (Object Lock), then to the queryable table; no audit write, no decrypt; IAM forbids editing or deleting audit rows (`test_every_decrypt_event_is_kept_write_once`, `test_no_decrypt_without_the_write_once_audit`) | tested |
 | T: spreadsheet formula injection from exported values | Doris copies prefix text starting with `=`, `+`, `-`, `@` with an apostrophe (`test_spreadsheet_formulas_are_neutralized_in_the_copies`) | tested |
