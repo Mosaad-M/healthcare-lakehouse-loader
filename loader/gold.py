@@ -62,8 +62,10 @@ def ensure_access(root: Polaris, s: Settings) -> None:
             if grant not in wanted:
                 expect(root.mgmt("POST", f"/catalogs/{catalog}/catalog-roles/gold_reader/grants", {"grant": grant}), 201)
     admin.ensure_principal(root, s, PRINCIPAL, {c: ["gold_reader", "gold_writer"] for c in CATALOGS})
-    # Earlier deploys gave the whole-catalog reader role.
-    expect(root.mgmt("DELETE", f"/principal-roles/{PRINCIPAL}_role/catalog-roles/phi/reader"), 204, 404)
+    # Earlier deploys gave the whole-catalog reader role (Polaris answers 400 for one not held).
+    held = expect(root.mgmt("GET", f"/principal-roles/{PRINCIPAL}_role/catalog-roles/phi"), 200)["roles"]
+    if "reader" in {r["name"] for r in held}:
+        expect(root.mgmt("DELETE", f"/principal-roles/{PRINCIPAL}_role/catalog-roles/phi/reader"), 204)
 
 
 def extension_options(s: Settings) -> dict:
