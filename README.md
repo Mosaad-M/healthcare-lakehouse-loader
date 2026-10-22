@@ -309,7 +309,7 @@ fixed their cause: they also cover the same failures from other causes.
 | The HTTP log records bearer tokens | yes | fixed | Logging stays off (tested) |
 | Spill files are unencrypted and go to the working directory | yes | yes | Encrypted spill in a private directory |
 | HTTP connections are not reused | yes | fixed | Connection caching on |
-| `LIMIT` without `ORDER BY` returns every row of a Gold table rewritten many times (seen on a long-running stack, not reproduced on a fresh table) | no | yes | Loader and model SQL never limit without ordering |
+| `LIMIT` without `ORDER BY` is ignored on a Gold table rewritten many times, in plain, aggregate and nested queries alike (seen on a long-running stack, not reproduced on a fresh table) | no | yes | Loader and model SQL never limit without ordering |
 
 Anything between DuckDB and Polaris must not give up on a commit before DuckDB does: a load
 balancer in front of Polaris needs an idle timeout above `LOADER_HTTP_TIMEOUT` (600 s).
