@@ -114,6 +114,16 @@ def test_unknown_names_are_refused():
         semantic.sql(["no_such_metric"])
 
 
+def test_a_limit_needs_an_order(gold):
+    """Without ORDER BY a LIMIT keeps arbitrary groups, and DuckDB ignores it on Gold tables written
+    whole (found on the stack: LIMIT 2 returned all 11 months). So sql() refuses it."""
+    with pytest.raises(ValueError, match="order_by"):
+        semantic.sql(["claims"], ["metric_time__month"], limit=1)
+    rows = gold.execute(semantic.sql(["claims"], ["metric_time__month"], ["metric_time__month"], limit=1)).fetchall()
+    first = gold.execute("SELECT min(date_trunc('month', service_date)) FROM phi.gold.fact_claim").fetchone()[0]
+    assert len(rows) == 1 and rows[0][0] == first
+
+
 def test_metric_queries_read_only_the_semantic_tables():
     assert semantic.tables() == {("phi", "gold", "fact_claim"), ("phi", "gold", "dim_provider"),
                                  ("deid", "gold", "metricflow_time_spine")}

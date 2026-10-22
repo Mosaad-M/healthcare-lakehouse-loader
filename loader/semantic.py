@@ -91,8 +91,13 @@ def _engine():
 
 def sql(metrics: list[str], group_by: list[str] = (), order_by: list[str] = (), limit: int | None = None) -> str:
     """The SQL for `metrics` by `group_by` (names such as metric_time__month or
-    provider_version__specialty). Unknown names raise."""
+    provider_version__specialty). Unknown names raise. A `limit` needs an `order_by`: without one
+    it would keep arbitrary groups, and DuckDB ignores it on Gold tables written whole anyway
+    (README, DuckDB), returning every group."""
     from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
+
+    if limit is not None and not order_by:
+        raise ValueError("a limit needs an order_by")
 
     request = MetricFlowQueryRequest.create(metric_names=list(metrics), group_by_names=list(group_by),
                                             order_by_names=list(order_by) or None, limit=limit)

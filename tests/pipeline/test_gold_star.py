@@ -209,6 +209,9 @@ def test_metric_queries_run_as_the_metrics_principal_and_match_gold(s, loaded):
         count(DISTINCT f.subject_id) FROM phi.gold.fact_claim f
         LEFT JOIN phi.gold.dim_provider d ON d.provider_sk = f.provider_sk GROUP BY 1""").fetchall()}
     assert got == expected and got
+    # A limit with its order is honoured on Gold (without one, DuckDB ignores it there: sql() refuses).
+    _, first = semantic.query(s, ["claims"], ["metric_time__month"], ["metric_time__month"], limit=1)
+    assert len(first) == 1
     con = duck.connect(s, "phi", principal=semantic.PRINCIPAL, alias="phi")
     duck.attach_polaris(con, s, "deid", principal=semantic.PRINCIPAL, alias="deid")
     assert con.execute("SELECT count(*) FROM phi.gold.fact_claim").fetchone()[0] > 0
