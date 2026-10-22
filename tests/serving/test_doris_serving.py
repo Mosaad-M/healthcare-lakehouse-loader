@@ -4,6 +4,7 @@ Loads enough synthetic people into the example sources that Gold's small-cell su
 rows, rebuilds Gold with dbt, refreshes the Doris copies through the Gold flow, then checks answers,
 freshness, latency, permissions and that Doris never holds a plaintext identifier.
 """
+import json
 import os
 import random
 import statistics
@@ -240,7 +241,7 @@ def test_the_backend_does_not_log_vended_tokens():
     assert values == {"WARNING"}, values
 
 
-def test_every_care_team_query_is_recorded_and_only_root_reads_the_record(loaded, run_id):
+def test_every_care_team_query_is_recorded_and_only_root_reads_the_record(s, loaded, run_id):
     """Doris records each query (user, time, client, statement, tables, rows) in its audit table; the
     serving users cannot read it. It flushes in batches (up to a minute)."""
     tag = f"audit_{run_id}_{random.randrange(10**9)}"
@@ -248,12 +249,27 @@ def test_every_care_team_query_is_recorded_and_only_root_reads_the_record(loaded
     deadline, rows = time.time() + 120, []
     while not rows and time.time() < deadline:
         time.sleep(5)
-        rows = doris.query(doris.connect(), "SELECT user, state, return_rows, queried_tables_and_views "
+        rows = doris.query(doris.connect(), "SELECT user, state, return_rows, queried_tables_and_views, query_id "
                            "FROM __internal_schema.audit_log WHERE stmt LIKE %s AND stmt NOT LIKE '%%audit_log%%'",
                            (f"%{tag}%",))  # not this polling query, which carries the tag too
     assert rows, "the query was not recorded"
-    who, state, returned, tables_read = rows[0]
+    who, state, returned, tables_read, query_id = rows[0]
     assert (who, state, returned) == ("care_team", "EOF", 3)
     assert "serving.member_claims" in str(tables_read)
     for name in ("care_team", "analyst"):
         assert refused(user(name), "SELECT count(*) FROM __internal_schema.audit_log"), name
+
+
+    # A write-once copy outside Doris, without the statement text (it can hold typed values).
+    from loader import journal
+    from loader.serving import export_audit
+
+    export_audit(s, margin_seconds=0)
+    c, bucket = journal.client(s), journal.bucket(s)
+    copied = [json.loads(line) for page in c.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix="doris-audit/")
+              for obj in page.get("Contents", []) if obj["LastModified"].timestamp() > time.time() - 600
+              for line in c.get_object(Bucket=bucket, Key=obj["Key"])["Body"].read().decode().splitlines()]
+    mine = [r for r in copied if r["query_id"] == query_id]
+    assert [(r["user"], r["return_rows"]) for r in mine] == [("care_team", 3)]
+    assert not {"stmt", "error_message"} & set(mine[0]), "statement text left Doris"
+    assert not any(tag in json.dumps(r) for r in copied)

@@ -3,9 +3,11 @@ expiry. Each copy is an internal Doris table rebuilt with INSERT OVERWRITE from 
 serves, and the Gold snapshot it holds is recorded. Copies hold de-identified data or still-encrypted
 identifiers only: they are built from Gold, which never holds plaintext identifiers.
 """
+import json
 import os
 import re
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from loader import doris
@@ -16,6 +18,12 @@ from loader.settings import Settings
 DATABASE = "serving"
 REFRESHER = "serving_refresher"
 REFRESHES = "serving_refresh"
+EXPORT_MARKS = "export_marks"  # DynamoDB: how far each export has copied
+AUDIT_LOG = "__internal_schema.audit_log"
+# Who ran what, against which tables, and how much it read and returned. Not the statement text or
+# error messages: they can hold values a user typed.
+AUDIT_FIELDS = ("query_id", "time", "user", "client_ip", "catalog", "db", "state", "error_code", "stmt_type",
+                "queried_tables_and_views", "scan_rows", "return_rows", "sql_digest")
 SQL = Path(__file__).parents[1] / "stack/doris"
 
 
@@ -107,3 +115,46 @@ def refresh(s: Settings, models: list[Model]) -> dict[str, int]:
         out[copy] = rows
     apply_grants(con)
     return out
+
+
+def grant_audit_read(con, timeout: float = 600) -> None:
+    """As root: let the refresher read Doris's query audit table, which Doris creates a while after
+    the backend joins (a grant on a missing table fails)."""
+    deadline = time.time() + timeout
+    while not doris.query(con, "SHOW TABLES FROM __internal_schema LIKE 'audit_log'"):
+        if time.time() > deadline:
+            raise TimeoutError("Doris did not create its audit table")
+        time.sleep(5)
+    doris.query(con, f"GRANT SELECT_PRIV ON internal.{AUDIT_LOG} TO ROLE 'refresher'")
+
+
+def export_audit(s: Settings, margin_seconds: int = 300) -> int:
+    """Copy Doris's query audit into the write-once journal (Object Lock), one object per day of
+    queries, and return the rows copied. Doris keeps its audit table 30 days, and its administrator
+    can change it; the journal keeps the copy for its retention. Queries newer than `margin_seconds`
+    wait for the next run: Doris writes its audit table in batches, up to a minute late."""
+    import pymysql
+
+    from loader import journal
+
+    con = doris.connect(REFRESHER, os.environ["DORIS_REFRESHER_PASSWORD"])
+    ddb, key = s.dynamodb(), {"name": {"S": "doris_audit"}}
+    item = ddb.get_item(TableName=EXPORT_MARKS, Key=key, ConsistentRead=True).get("Item")
+    cutoff = doris.query(con, "SELECT date_sub(now(3), INTERVAL %s SECOND)", (margin_seconds,))[0][0]
+    mark = (datetime.fromisoformat(item["through"]["S"]) if item
+            else (doris.query(con, f"SELECT min(time) FROM {AUDIT_LOG}")[0][0] or cutoff) - timedelta(milliseconds=1))
+    copied = 0
+    while mark < cutoff:
+        end = min(cutoff, mark + timedelta(days=1))
+        with con.cursor(pymysql.cursors.DictCursor) as cur:
+            cur.execute(f"SELECT {', '.join(f'`{f}`' for f in AUDIT_FIELDS)} FROM {AUDIT_LOG} "
+                        "WHERE time > %s AND time <= %s ORDER BY time, query_id", (mark, end))
+            rows = cur.fetchall()
+        if rows:
+            body = "\n".join(json.dumps(r, default=str, sort_keys=True) for r in rows).encode()
+            journal.client(s).put_object(Bucket=journal.bucket(s), ContentType="application/x-ndjson", Body=body,
+                                         Key=f"doris-audit/{end:%Y/%m/%d}/{mark:%Y%m%dT%H%M%S%f}-{end:%Y%m%dT%H%M%S%f}.jsonl")
+            copied += len(rows)
+        ddb.put_item(TableName=EXPORT_MARKS, Item={**key, "through": {"S": end.isoformat()}})
+        mark = end
+    return copied
