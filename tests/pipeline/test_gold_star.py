@@ -166,3 +166,32 @@ def test_lab_monthly_has_lost_its_minimum_and_maximum_columns(s, loaded):
     """A column removed from a Gold model leaves the Iceberg table at deploy, not just the model."""
     columns = [r[0] for r in gold(s).execute("DESCRIBE deid.gold.lab_monthly").fetchall()]
     assert "min_value" not in columns and "max_value" not in columns and "sum_value" in columns
+
+
+def test_a_refresh_with_nothing_new_rewrites_nothing(s, loaded):
+    """Gold rewrites whole tables; with no source changed since the last run it must not copy them
+    again (it ran every 10 minutes, about 1,000 copies per table kept for a week)."""
+    from loader import gold as gold_mod
+    from loader.polaris import Polaris
+
+    def current(table):
+        return Polaris(s).load_table("phi", "gold", table)["metadata"]["current-snapshot-id"]
+
+    gold_mod.run(s)  # whatever ran last, record a run of the current inputs
+    before = current("fact_claim")
+    assert gold_mod.run(s) == []
+    assert current("fact_claim") == before
+    assert gold_mod.run(s, force=True), "force rebuilds anyway"
+    assert current("fact_claim") != before
+
+
+def test_rewritten_gold_tables_keep_a_day_of_snapshots_and_dimensions_a_week(s, loaded):
+    from loader import maintenance
+    from loader.polaris import Polaris
+
+    def expiry(catalog, table):
+        effective = maintenance.policies(Polaris(s, "maintenance"), catalog, "gold", table)
+        return effective["system.snapshot-expiry"]["config"]["max-snapshot-age-hours"]
+
+    assert expiry("phi", "fact_claim") == 24 and expiry("deid", "claims_monthly") == 24
+    assert expiry("phi", "dim_provider") == 168  # history: incremental writes, kept as the default

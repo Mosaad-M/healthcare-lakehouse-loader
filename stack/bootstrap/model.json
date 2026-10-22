@@ -21,7 +21,7 @@
     "shred_events": "request_id",
     "decrypt_audit": "event_id",
     "serving_refresh": "copy",
-    "maintenance_runs": "run_id",
+    "maintenance_runs": "run_id", "gold_runs": "name",
     "partners": "partner"
   },
   "catalogs": {

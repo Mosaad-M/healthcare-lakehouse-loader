@@ -169,6 +169,9 @@ Existing key-encryption keys move under their partner's master key with `loader.
   - `phi.gold.member_claims`: one row per member for care teams; the member name stays encrypted.
 - **Serving** copies Gold into Doris tables in the same flow that rebuilds Gold, and records which
   Gold snapshot each copy holds. Encrypted columns stay encrypted.
+- **The Gold flow skips a run** when nothing it reads has changed since the last one (the compiled
+  models and every source table's snapshot), so whole-table models are not copied every 10 minutes.
+  They keep a day of snapshots; the incremental dimensions keep the 7-day default.
 - **Doris roles:** `analyst` reads the de-identified copies; `analyst_ma` the same, limited to one
   state by a row policy; `care_team` reads the member mart without its identifier column. Point
   lookups on the member mart run at about 10 ms (p95) locally.

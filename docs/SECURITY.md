@@ -65,6 +65,7 @@ STRIDE per trust boundary. **Tested** means a test fails if the control breaks; 
 | I: PHI in Iceberg metadata (statistics, partition values, paths) | Column metrics limited to counts in the PHI catalog; partitions by ingest day only (`test_phi_metadata.py`) | tested |
 | T: a writer changes table properties | Deploy re-asserts them; a catalog-side guard is not built | partial |
 | R: no record of who read which table | CloudTrail data events; each vended session is named after its principal and table (`tests/aws/test_audit.py`) | tested on AWS |
+| R: no record of who queried Doris | Doris records every query (user, time, client, statement, tables read, rows returned) in `__internal_schema.audit_log`, which serving users cannot read (`test_every_care_team_query_is_recorded_and_only_root_reads_the_record`). Kept 30 days, inside Doris, and alterable by its administrator; a write-once export is not built. Logins are shared per role (`analyst`, `care_team`): per-person logins need LDAP or SSO | partial |
 
 ### Lake to serving and to people (Gold, Doris, re-identification)
 
